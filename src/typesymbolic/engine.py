@@ -5,19 +5,29 @@ needs a second real domain plugin to validate it against.
 `gate_extra`, given the pick, the facts, and the `verify_qid` answer (if
 any), supplies whatever extra kwarg the chosen `gate` needs (`denied=...`
 for `mutation_gate`, `grounded=...` for `claim_gate`) — `resolve_one()`
-itself stays gate-shape-blind. `store`, given, makes `threshold` the
-fallback and reads the live value keyed on `(qid, judge.name,
-result.model_revision)`, the same key `calibrate.recalibrate()` writes to.
-`circuit_gate_extra()` builds a `gate_extra` from a `circuit.py` circuit.
+itself stays gate-shape-blind. `circuit_gate_extra()` builds a `gate_extra`
+from a `circuit.py` circuit.
+
+`store`, given, makes `threshold` the fallback and reads the live value
+keyed on `(qid, judge.name, result.model_revision)`. With `journal` also
+given, `resolve_one()` recalibrates that key inline before reading it,
+whenever `journal`'s live index has grown past what `store` was last
+calibrated against — so the threshold this qid gates on always reflects
+everything verified about it before now, not just whatever a caller
+remembered to recalibrate on a separate schedule. The freshness check costs
+a `flush()` (bounded by however far behind the write queue currently is,
+not by journal size) only on the call where it's actually needed.
 """
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from .calibrate import recalibrate as _recalibrate
 from .circuit import GateSpec, evaluate_gates, result_key
 from .domain import ActOutcome, DomainAdapter, Facts, Verdict
 from .gate import GateResult, blocks_act, mutation_gate
@@ -84,6 +94,11 @@ async def resolve_one(
         )
 
     extra = gate_extra(chosen_id, facts, verify_answer) if gate_extra is not None else {}
+    if store is not None and journal is not None:
+        await asyncio.to_thread(journal.flush)
+        fresh_n = len(journal.labeled_pairs(qid, engine=judge.name, model_revision=result.model_revision))
+        if fresh_n > store.get_n(qid, engine=judge.name, model_revision=result.model_revision):
+            _recalibrate(journal=journal, store=store, qid=qid, engine=judge.name, model_revision=result.model_revision, default_threshold=threshold)
     gate_threshold = (
         store.get(qid, engine=judge.name, model_revision=result.model_revision, default=threshold)
         if store is not None else threshold

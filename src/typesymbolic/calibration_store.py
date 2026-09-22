@@ -104,6 +104,14 @@ class CalibrationStore:
         self._cache = entries  # refill so this process sees its own write immediately
         return self._path()
 
+    def get_n(self, name: str, *, engine: str, model_revision: str | None = None) -> int:
+        """The label count `set()` last recorded for this key — the
+        watermark a caller compares against fresh data to decide whether a
+        refit is warranted. 0 if never set."""
+        entry = self._load().get(self.key(name, engine, model_revision))
+        n = entry.get("n") if entry else None
+        return n if isinstance(n, int) and not isinstance(n, bool) else 0
+
     def all(self) -> dict[str, dict]:
         """Every stored value, for a caller inspecting what calibration did."""
         return dict(self._load())

@@ -70,3 +70,25 @@ async def test_self_calibration_tightens_and_the_next_resolve_one_uses_it(tmp_pa
     # same 0.6-confidence pick that acted before now escalates instead
     outcome = await _resolve_scripted(confidence=0.6, threshold=0.5, journal=journal, store=store)
     assert outcome.status == "needs_approval"
+
+
+async def test_resolve_one_recalibrates_inline_with_no_explicit_recalibrate_call(tmp_path):
+    """The actual requirement: recalibrates itself before the same qid
+    recurs, with only store=/journal= passed to resolve_one() -- no
+    caller-side recalibrate() call, no scheduler."""
+    journal = Journal(root=tmp_path / "journal")
+    store = CalibrationStore(root=tmp_path / "store")
+
+    for _ in range(25):
+        result = await _resolve_scripted(confidence=0.95, threshold=0.5, journal=journal, store=store)
+        assert result.status == "verified"
+
+    # no recalibrate() call anywhere here -- resolve_one()'s own inline check does it
+    statuses = [
+        (await _resolve_scripted(confidence=0.6, threshold=0.5, journal=journal, store=store)).status
+        for _ in range(5)
+    ]
+    assert "failed" in statuses  # some early ones still acted, on the stale threshold
+    assert statuses[-1] == "needs_approval"  # by the last one, it has learned
+    assert store.get("kind.pick", engine="scripted", model_revision="scripted", default=0.5) > 0.6
+    assert store.get("kind.pick", engine="scripted", model_revision="scripted", default=0.5) > 0.6

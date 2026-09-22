@@ -1,18 +1,22 @@
 # typesymbolic
 
-**Status: all core modules implemented, importable end to end, 135 tests
+**Status: all core modules implemented, importable end to end, 136 tests
 passing.** `judge.py`, `domain.py`, `gate.py`, `circuit.py`, `vocab.py`
 (`FrozenVocabulary`), `journal.py`, `calibrate.py`, `calibration_store.py`,
 and `engine.py`'s `resolve_one()` wire the whole ODAV loop together —
 including two things that were previously built but not actually connected:
 `circuit.py`'s composable gates reach `resolve_one()` through
-`engine.circuit_gate_extra()`, and `calibrate.recalibrate()` writes a
-tightened threshold to a `CalibrationStore` that `resolve_one(store=...)`
-reads back on the next call, so a system built on this genuinely calibrates
-itself from its own journal over time (see `tests/test_selfcalibration.py`).
-No real domain plugin exists yet — a jevdevice or repo-activity migration is
-a separate, explicitly-approved step (see CLAUDE.md) — the tests use fakes
-shaped after both real domains to validate the protocol shapes, not
+`engine.circuit_gate_extra()`, and calibration is genuinely automatic, not
+just available: `Journal` writes through a background thread (no I/O on the
+decision path) and keeps a live per-question index; `resolve_one()`, given
+both `store=` and `journal=`, recalibrates a question's threshold inline —
+before gating on it — whenever that index shows something new since the
+threshold was last fit, so a fast, many-decisions-per-second caller (see
+`tests/test_selfcalibration.py`) never has to remember to call
+`calibrate.recalibrate()` itself. No real domain plugin exists yet — a
+jevdevice or repo-activity migration is a separate, explicitly-approved step
+(see CLAUDE.md) — the tests use fakes shaped after both real domains to
+validate the protocol shapes, not
 stand-ins for a migration.
 
 ## What this is

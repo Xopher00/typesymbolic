@@ -93,21 +93,39 @@ def sweep_threshold(
     return None, len(pairs), None, f"precision {min_precision} unreachable on this window (n={len(pairs)}) -- keep incumbent"
 
 
-def _propose(
-    rows: list[dict], qid: str, current: float, *, engine: str | None = None, model_revision: str | None = None,
+def _propose_from_pairs(
+    pairs: list[tuple[float, bool]], qid: str, current: float, *, note_suffix: str = "",
     min_precision: float = DEFAULT_MIN_PRECISION, min_labels: int = DEFAULT_MIN_LABELS,
     candidates: tuple[float, ...] = DEFAULT_CANDIDATE_THRESHOLDS,
 ) -> tuple[ThresholdProposal, bool]:
     """The sweep, never raising: `(proposal, would_loosen)`. Callers decide
     what to do with a loosening proposal; this just computes it."""
-    pairs, revisions_seen = _labeled_pairs(rows, qid, engine=engine, model_revision=model_revision)
     proposed, n, precision, note = sweep_threshold(pairs, min_precision=min_precision, min_labels=min_labels, candidates=candidates)
-    if engine is None and model_revision is None and len(revisions_seen) > 1:
-        seen = sorted(r for r in revisions_seen if r != (None, None))
-        note += f" -- pooled across {seen}; pass engine=/model_revision= to isolate one"
+    note += note_suffix
     if proposed is None:
         return ThresholdProposal(qid, current, current, n, precision, note), False
     return ThresholdProposal(qid, current, proposed, n, precision, note), proposed < current
+
+
+def _propose(
+    rows: list[dict], qid: str, current: float, *, engine: str | None = None, model_revision: str | None = None,
+    min_precision: float = DEFAULT_MIN_PRECISION, min_labels: int = DEFAULT_MIN_LABELS,
+    candidates: tuple[float, ...] = DEFAULT_CANDIDATE_THRESHOLDS,
+) -> tuple[ThresholdProposal, bool]:
+    """`_propose_from_pairs`, sourcing pairs from raw journal `rows` (a
+    `journal.replay()` scan) rather than `Journal`'s live index — for a
+    caller working from historical/offline rows rather than a running
+    `Journal`. Flags pooling across (engine, model_revision) when neither is
+    given to isolate one."""
+    pairs, revisions_seen = _labeled_pairs(rows, qid, engine=engine, model_revision=model_revision)
+    note_suffix = ""
+    if engine is None and model_revision is None and len(revisions_seen) > 1:
+        seen = sorted(r for r in revisions_seen if r != (None, None))
+        note_suffix = f" -- pooled across {seen}; pass engine=/model_revision= to isolate one"
+    return _propose_from_pairs(
+        pairs, qid, current, note_suffix=note_suffix,
+        min_precision=min_precision, min_labels=min_labels, candidates=candidates,
+    )
 
 
 def tighten_only_threshold(
@@ -140,19 +158,19 @@ def recalibrate(
     default_threshold: float, min_precision: float = DEFAULT_MIN_PRECISION, min_labels: int = DEFAULT_MIN_LABELS,
     candidates: tuple[float, ...] = DEFAULT_CANDIDATE_THRESHOLDS, human_signoff: bool = False,
 ) -> RecalibrationResult:
-    """Refit `qid`'s threshold from the journal and apply it through `store`:
-    a tightening move applies automatically, a loosening move only with
-    `human_signoff`. Unlike `tighten_only_threshold()`, never raises — a
-    driver meant to run repeatedly can't have every healthy cycle blow up
-    just because the sweep proposed below a conservative incumbent; the
-    refusal is recorded and the incumbent kept instead. Every cycle is
-    journaled, applied or not.
+    """Refit `qid`'s threshold from `journal`'s live index (no disk read —
+    see `Journal.labeled_pairs`) and apply it through `store`: a tightening
+    move applies automatically, a loosening move only with `human_signoff`.
+    Unlike `tighten_only_threshold()`, never raises — a driver meant to run
+    repeatedly can't have every healthy cycle blow up just because the
+    sweep proposed below a conservative incumbent; the refusal is recorded
+    and the incumbent kept instead. Every cycle is journaled, applied or not.
     """
     current = store.get(qid, engine=engine, model_revision=model_revision, default=default_threshold)
-    rows = list(journal.replay())
-    proposal, would_loosen = _propose(
-        rows, qid, current, engine=engine, model_revision=model_revision,
-        min_precision=min_precision, min_labels=min_labels, candidates=candidates,
+    journal.flush()  # guarantee every row enqueued before this call is indexed
+    pairs = journal.labeled_pairs(qid, engine=engine, model_revision=model_revision)
+    proposal, would_loosen = _propose_from_pairs(
+        pairs, qid, current, min_precision=min_precision, min_labels=min_labels, candidates=candidates,
     )
     applied = proposal.proposed != current and (not would_loosen or human_signoff)
     resolved_threshold = proposal.proposed if applied else current
