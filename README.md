@@ -1,6 +1,6 @@
 # typesymbolic
 
-**Status: all core modules implemented, importable end to end, 146 tests
+**Status: all core modules implemented, importable end to end, 150 tests
 passing.** `judge.py`, `domain.py`, `gate.py`, `circuit.py`, `vocab.py`
 (`FrozenVocabulary`), `journal.py`, `calibrate.py`, `calibration_store.py`,
 and `engine.py`'s `resolve_one()` wire the whole ODAV loop together —
@@ -25,9 +25,20 @@ Choice case), `Journal.record_snapshot()` (an opaque, unindexed row for a
 domain whose durable record is a whole run's output rather than a
 per-decision label), the index-rebuild-on-construction above, and
 `judge.ask_all_sync()` (a synchronous `JudgeEngine.ask_all()` wrapper for a
-caller whose own control flow isn't async). No real domain plugin is wired
-up yet — an actual jevdevice or repo-activity migration is a separate,
-explicitly-approved step (see CLAUDE.md) — the tests use fakes shaped after
+caller whose own control flow isn't async). `JevEngine.__init__` now also
+forwards `retry` to the SDK client, and `CalibrationStore.path` is public.
+
+Using `ask_all_sync()` for more than one call surfaced a real bug in it:
+calling it twice against the same `JevEngine` crashes the second call, because
+`asyncio.run()` tears its event loop down on return while the engine's
+pooled HTTP connection stays bound to it. `JevEngine` now has `aclose()`/
+`__aenter__`/`__aexit__`, and `judge.SyncJevSession` is the safe primitive
+for a synchronous caller making more than one call — it keeps one event
+loop alive for the whole session instead of one per call.
+
+No real domain plugin is wired up yet — an actual jevdevice or
+repo-activity migration is a separate, explicitly-approved step (see
+CLAUDE.md) — the tests use fakes shaped after
 both real domains to validate the protocol shapes, not stand-ins for a
 migration.
 

@@ -1,8 +1,17 @@
+import asyncio
+
 import httpx2
 import pytest
 import typesafe_sdk
 
-from typesymbolic.judge import JevEngine, JudgeError, ScriptedJudge, ask_all_sync
+from typesymbolic.judge import (
+    AskResult,
+    JevEngine,
+    JudgeError,
+    ScriptedJudge,
+    SyncJevSession,
+    ask_all_sync,
+)
 from typesymbolic.question import Answer, Choice, Noul, Score
 
 
@@ -115,27 +124,78 @@ def test_ask_all_sync_runs_a_synchronous_judge_call():
     assert result.model_revision == "scripted"
 
 
-def test_ask_all_sync_reuses_the_same_event_loop_across_calls():
-    """Regression: a first implementation ran a fresh `asyncio.run()` per
-    call, which tears the loop down on return -- fine for `ScriptedJudge`
-    (holds no loop-bound resources) but broke a real `JevEngine` on its
-    second call (its connection pool bound to the first, now-closed loop)."""
-    from typesymbolic import judge as judge_module
+class _LoopSpyJudge:
+    """Records which event loop was running for each `ask_all()` call --
+    proves `SyncJevSession` reuses one loop rather than a fresh one per
+    call, the exact mismatch `ask_all_sync()` reused across calls has."""
 
-    questions = {"escalate": Noul(instructions="should we escalate?")}
-    judge = ScriptedJudge([
-        {"escalate": Answer.from_noul("escalate", 0.9)},
-        {"escalate": Answer.from_noul("escalate", 0.1)},
-    ])
+    name = "loop-spy"
 
-    ask_all_sync(judge, {"finding": "a"}, questions)
-    loop_after_first = judge_module._sync_loop
-    result = ask_all_sync(judge, {"finding": "b"}, questions)
-    loop_after_second = judge_module._sync_loop
+    def __init__(self) -> None:
+        self.loops: list[object] = []
 
-    assert loop_after_first is loop_after_second
-    assert not loop_after_second.is_closed()
-    assert result.answers["escalate"].noul == 0.1
+    async def ask_all(self, state: dict, questions) -> AskResult:
+        self.loops.append(asyncio.get_running_loop())
+        return AskResult(answers={}, model_revision="loop-spy")
+
+
+def test_sync_jev_session_reuses_one_event_loop_across_calls():
+    judge = _LoopSpyJudge()
+    with SyncJevSession(judge) as session:
+        session.ask_all({}, {"q": Noul(instructions="?")})
+        session.ask_all({}, {"q": Noul(instructions="?")})
+
+    assert len(judge.loops) == 2
+    assert judge.loops[0] is judge.loops[1]
+
+
+def test_sync_jev_session_closes_the_judge_if_it_has_aclose():
+    class _ClosableJudge:
+        name = "closable"
+        closed = False
+
+        async def ask_all(self, state: dict, questions) -> AskResult:
+            return AskResult(answers={}, model_revision="closable")
+
+        async def aclose(self) -> None:
+            self.closed = True
+
+    judge = _ClosableJudge()
+    session = SyncJevSession(judge)
+    session.ask_all({}, {"q": Noul(instructions="?")})
+    session.close()
+
+    assert judge.closed is True
+
+
+def test_sync_jev_session_close_is_safe_without_an_aclose_method():
+    judge = ScriptedJudge([{"q": Answer.from_noul("q", 0.5)}])
+    session = SyncJevSession(judge)
+    session.ask_all({}, {"q": Noul(instructions="?")})
+    session.close()  # ScriptedJudge has no aclose() -- must not raise
+
+
+async def test_jev_engine_aclose_closes_the_underlying_client():
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(200, json={"model": "jev-latest", "usage": {"input_tokens": 1, "output_tokens": 1}, "answers": {"q": {"type": "noul", "noul": 0.5}}})
+
+    engine = JevEngine(api_key="fake-key", transport=httpx2.MockTransport(handler))
+    await engine.ask_all({}, {"q": Noul(instructions="?")})
+    assert engine._client._http_client.is_closed is False
+
+    await engine.aclose()
+
+    assert engine._client._http_client.is_closed is True
+
+
+async def test_jev_engine_async_context_manager_closes_on_exit():
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(200, json={"model": "jev-latest", "usage": {"input_tokens": 1, "output_tokens": 1}, "answers": {"q": {"type": "noul", "noul": 0.5}}})
+
+    async with JevEngine(api_key="fake-key", transport=httpx2.MockTransport(handler)) as engine:
+        await engine.ask_all({}, {"q": Noul(instructions="?")})
+
+    assert engine._client._http_client.is_closed is True
 
 
 async def test_jev_engine_wraps_typesafe_error_as_cause():

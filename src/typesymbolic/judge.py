@@ -7,14 +7,21 @@ guess; `gate.py`/`calibrate.py` only mean what they say against that.
 journals nothing and tracks no usage itself, that's `journal.py`/`engine.py`.
 `AskResult.model_revision` is the concrete version that answered (never a
 requested alias) — `journal.py` and `calibrate.py` key on it alongside `name`.
+
+A `JevEngine` holds one pooled HTTP client for its whole lifetime, and that
+pool binds to whichever event loop first used it — `asyncio.run()` tears
+its loop down on return, so calling `ask_all_sync()` twice against the same
+`JevEngine` crashes the second call with "Event loop is closed", not just
+leaks a connection. `ask_all_sync()` is for exactly one call; a synchronous
+caller making more than one must use `SyncJevSession`, which keeps one loop
+alive for the session instead of one per call.
 """
 
 from __future__ import annotations
 
 import asyncio
-import threading
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Protocol, Self
 
 from .question import Answer, Choice, Noul, Question, Score
 
@@ -35,35 +42,39 @@ class JudgeEngine(Protocol):
     async def ask_all(self, state: dict, questions: dict[str, Question]) -> AskResult: ...
 
 
-_sync_loop: asyncio.AbstractEventLoop | None = None
-_sync_loop_lock = threading.Lock()
-
-
-def _get_sync_loop() -> asyncio.AbstractEventLoop:
-    """One event loop, lazily started on a daemon thread and reused for
-    every `ask_all_sync()` call for the rest of the process. `asyncio.run()`
-    per call tears the loop down on return; a judge holding a persistent
-    connection (`JevEngine`'s `AsyncTypeSafeClient`) binds its connection
-    pool to whichever loop was live when it made its first real request, so
-    a second `asyncio.run()` call hands that pool to an unrelated, already-
-    closed loop and crashes -- confirmed live against the real API, not
-    reproducible with a mock transport (no real socket ever binds to the
-    loop). One shared loop for the process's lifetime keeps the pool valid
-    across calls with no lifecycle API for the caller to manage."""
-    global _sync_loop
-    with _sync_loop_lock:
-        if _sync_loop is None:
-            _sync_loop = asyncio.new_event_loop()
-            threading.Thread(target=_sync_loop.run_forever, daemon=True).start()
-        return _sync_loop
-
-
 def ask_all_sync(judge: JudgeEngine, state: dict, questions: dict[str, Question]) -> AskResult:
-    """`ask_all()` from synchronous code — for a caller whose own control
-    flow isn't async and shouldn't have to become so just to reach
-    `JudgeEngine`. Safe to call repeatedly on the same judge instance; every
-    call runs on one shared background loop, see `_get_sync_loop()`."""
-    return asyncio.run_coroutine_threadsafe(judge.ask_all(state, questions), _get_sync_loop()).result()
+    """One `ask_all()` call from synchronous code, via `asyncio.run()` — for
+    a caller whose own control flow isn't async and shouldn't have to
+    become so just to reach `JudgeEngine`. Not for use inside a running
+    event loop, and safe for exactly one call per `judge` — see the module
+    docstring; `SyncJevSession` is the safe primitive for more than one."""
+    return asyncio.run(judge.ask_all(state, questions))
+
+
+class SyncJevSession:
+    """Drives repeated `ask_all()` calls from synchronous code inside one
+    event loop kept alive for the whole session — unlike calling
+    `ask_all_sync()` more than once against the same `judge`, this never
+    hands a pooled connection from one loop to another."""
+
+    def __init__(self, judge: JudgeEngine) -> None:
+        self._judge = judge
+        self._loop = asyncio.new_event_loop()
+
+    def ask_all(self, state: dict, questions: dict[str, Question]) -> AskResult:
+        return self._loop.run_until_complete(self._judge.ask_all(state, questions))
+
+    def close(self) -> None:
+        aclose = getattr(self._judge, "aclose", None)
+        if aclose is not None:
+            self._loop.run_until_complete(aclose())
+        self._loop.close()
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        self.close()
 
 
 def _to_sdk_question(sdk, question: Question):
@@ -119,6 +130,18 @@ class JevEngine:
             raise JudgeError(f"Jev request failed ({type(error).__name__}: {error})") from error
         answers = {qid: _from_sdk_answer(qid, answer) for qid, answer in response.answers.items()}
         return AskResult(answers=answers, model_revision=response.model)
+
+    async def aclose(self) -> None:
+        """Release the pooled HTTP connection. Required before letting the
+        event loop that made this engine's calls end — an unclosed pool
+        left bound to a dead loop is exactly `ask_all_sync()`'s crash."""
+        await self._client.aclose()
+
+    async def __aenter__(self) -> Self:
+        return self
+
+    async def __aexit__(self, *exc_info: object) -> None:
+        await self.aclose()
 
 
 class ScriptedJudge:

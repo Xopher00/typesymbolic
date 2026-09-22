@@ -29,6 +29,7 @@ from .judge import (
     JudgeEngine,
     JudgeError,
     ScriptedJudge,
+    SyncJevSession,
     ask_all_sync,
 )
 from .question import Answer, Choice, Noul, Question, Score
@@ -59,6 +60,7 @@ __all__ = [
     "ResolveResult",
     "Score",
     "ScriptedJudge",
+    "SyncJevSession",
     "ThresholdProposal",
     "Verdict",
     "Vocabulary",
