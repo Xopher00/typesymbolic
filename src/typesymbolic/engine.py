@@ -1,29 +1,14 @@
-"""The ODAV loop: observe -> propose candidates -> ask the judge (a
-vocab-sourced Choice) -> gate -> act -> verify -> journal. Single-shot
-`resolve_one()` only — a multi-step loop needs a second real domain plugin
-to validate it against before it's worth building.
+"""The ODAV loop: observe -> propose -> ask the judge -> gate -> act ->
+verify -> journal. Single-shot `resolve_one()` only — a multi-step loop
+needs a second real domain plugin to validate it against.
 
-A domain's own deny/groundedness check often needs more than the candidate
-id `propose()` returns (e.g. the literal command a pick would run), and
-`act()` is the only place that gets built. `gate_extra` lets a domain plugin
-compute its own denied/grounded flag from (chosen_id, facts) before act()
-runs, without `resolve_one()` needing to know the gate's shape.
-
-`verify_qid`, when given, asks the judge a second, Noul-shaped question in
-the same batch as the primary pick — "is this supported?" — instead of the
-domain hand-rolling its own groundedness heuristic. Its `Answer` reaches
-`gate_extra` as a third argument, so grounding a claim is still a calibrated
-judgment, not code guessing at support from raw evidence.
-
-`store`, given, makes `threshold` the fallback for a question calibration
-hasn't seen yet and reads the live value keyed on `(qid, judge.name,
-result.model_revision)` — the same key `calibrate.recalibrate()` writes to.
-Read per call and never cached here, since a cached value would ignore a
-recalibration that just ran.
-
-`circuit_gate_extra()` turns a `circuit.py` circuit into a ready-to-pass
-`gate_extra`, so composing more than one confidence threshold into a gate
-decision doesn't need a hand-written closure per call site.
+`gate_extra`, given the pick, the facts, and the `verify_qid` answer (if
+any), supplies whatever extra kwarg the chosen `gate` needs (`denied=...`
+for `mutation_gate`, `grounded=...` for `claim_gate`) — `resolve_one()`
+itself stays gate-shape-blind. `store`, given, makes `threshold` the
+fallback and reads the live value keyed on `(qid, judge.name,
+result.model_revision)`, the same key `calibrate.recalibrate()` writes to.
+`circuit_gate_extra()` builds a `gate_extra` from a `circuit.py` circuit.
 """
 
 from __future__ import annotations
@@ -51,7 +36,7 @@ class ResolveResult:
     reasons: tuple[str, ...]
     call_id: str
     facts: Facts
-    gate: GateResult | None
+    gate_result: GateResult | None
     outcome: ActOutcome | None
     verdict: Verdict | None
 
@@ -63,13 +48,7 @@ async def resolve_one(
     verify_qid: str | None = None, store: CalibrationStore | None = None,
     journal: Journal | None = None, slots: dict[str, str] | None = None,
 ) -> ResolveResult:
-    """One goal -> one gated action, end to end. `gate` defaults to
-    `mutation_gate`; pass `claim_gate` for a publish-shaped domain.
-    `gate_extra`, given the judge's pick, the observed facts, and the
-    `verify_qid` answer (`None` if `verify_qid` wasn't given), supplies
-    whatever extra kwarg that gate needs (`denied=...` for `mutation_gate`,
-    `grounded=...` for `claim_gate`) — resolve_one() itself stays
-    gate-shape-blind."""
+    """One goal -> one gated action, end to end."""
     facts = await domain.observe()
     candidates = domain.propose(facts)
     call_id = str(uuid.uuid4())
@@ -128,16 +107,15 @@ def circuit_gate_extra(
     gates: dict[str, GateSpec], *, key: str, kwarg: str,
     verify_key: str = "verify", extra: Callable[[Facts], dict[str, Answer]] | None = None,
 ) -> Callable[[str, Facts, Answer | None], dict[str, Any]]:
-    """Turn a composed circuit into a ready-to-pass `gate_extra`: evaluates
-    `gates` over the `verify_qid` answer (keyed as `verify_key`) plus
-    whatever `extra(facts)` supplies, then returns `{kwarg: result_key(gates[key]) is True}`.
-    Fails closed — an abstain/escalate outcome makes `result_key` return its
-    outcome string, not `True`, so an uncertain circuit denies/withholds
-    exactly like a `False` would."""
-    def gate_extra(chosen_id: str, facts: Facts, verify_answer: Answer | None) -> dict[str, Any]:
+    """Build a `gate_extra` from a circuit: evaluates `gates` over the
+    `verify_qid` answer (keyed as `verify_key`) plus `extra(facts)`, and
+    returns `{kwarg: result_key(gates[key]) is True}` — an abstain/escalate
+    outcome makes `result_key` return its outcome string, not `True`, so an
+    uncertain circuit fails closed the same as an explicit `False`."""
+    def _gate_extra(chosen_id: str, facts: Facts, verify_answer: Answer | None) -> dict[str, Any]:
         answers = dict(extra(facts)) if extra is not None else {}
         if verify_answer is not None:
             answers[verify_key] = verify_answer
         results = evaluate_gates(gates, answers)
         return {kwarg: result_key(results[key]) is True}
-    return gate_extra
+    return _gate_extra

@@ -129,7 +129,7 @@ async def test_resolve_one_claim_gate_publishes_and_hedges_still_act():
     )
 
     # hedge still reaches act(), unlike mutation_gate's needs_approval
-    assert result.gate.verdict == "hedge"
+    assert result.gate_result.verdict == "hedge"
     assert domain.acted_on == "low"
     assert result.status == "verified"
 
@@ -234,7 +234,7 @@ async def test_circuit_gate_extra_publishes_when_the_circuit_decides_true():
         gate=claim_gate, verify_qid="verify.grounded", gate_extra=extra_gate,
     )
 
-    assert result.gate.verdict == "publish"
+    assert result.gate_result.verdict == "publish"
     assert domain.acted_on == "high"
 
 

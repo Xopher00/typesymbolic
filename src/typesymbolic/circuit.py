@@ -1,44 +1,31 @@
-"""Composable gates over calibrated `Answer`s: code decides how multiple
-judgments combine (AND/OR/NOT, majority vote, verify, ordinal bucketing),
-so composition is versionable and testable offline instead of folded into a
-single ask. `gate.py`'s two named gates stay the simple, common-case entry
-point; this module is for a caller that needs more than one confidence
-threshold to make its decision.
+"""Composable gates over calibrated `Answer`s — AND/OR/NOT, majority vote,
+verify, ordinal bucketing. `gate.py` stays the simple, common-case entry
+point; this module is for a decision that needs more than one threshold.
 
 A `GateSpec` reads one or more answer ids, or an earlier gate id in the same
-circuit — so a circuit is a small DAG, not just a flat list — and produces
-a `CircuitResult`: a value, the probability behind it, and a trace.
+circuit (a small DAG, not a flat list), and produces a `CircuitResult`.
 
-Ops (an `input`/`inputs` entry is an answer id, "answer_id:option" for a
-choice/score answer's probability of one option, or an earlier gate id):
+Ops (`input`/`inputs` is an answer id, "answer_id:option" for a choice/score
+answer's probability of one option, or an earlier gate id):
 
-    threshold  input: noul               value: bool
-               p = P(input); passes if p >= tau
+    threshold  input: noul               value: bool, passes if p >= tau
     not        input: noul                value: bool, p = 1 - p_in
     and / or   inputs: k nouls            value: bool
-               combine: "product" (default) p = prod(p) / 1 - prod(1-p),
-               correct only if the inputs are independent — an assumption
-               this module reports in the trace but cannot verify;
-               "weak" min(p) / max(p), idempotent, so correlated inputs
-               are not double-counted; "strong" max(0, sum(p)-(k-1)) /
-               min(1, sum(p)), joint necessity, where one near-0 input
-               collapses a strong AND to 0. (Gödel / product /
-               Łukasiewicz: the three continuous t-norms, not a menu to
-               extend.)
-    majority   inputs: k choices over the same option set   value: option
-               votes by argmax; p = mean probability of the winner
-    argmax     input: choice              value: option
-               uncertain when confidence < min_confidence
-    verify     input: choice, check: noul  value: option
-               the check answers "is this choice supported?"; uncertain when
-               P(check) < tau or the choice's own confidence < min_confidence
+               combine: "product" (default, independence) / "weak"
+               (min/max, idempotent) / "strong" (bounded sum/difference,
+               saturating) — the three continuous t-norms, not a menu to
+               extend
+    majority   inputs: k choices, same option set   value: option
+    argmax     input: choice              value: option, uncertain if
+               confidence < min_confidence
+    verify     input: choice, check: noul  value: option, uncertain if
+               P(check) < tau or confidence < min_confidence
     order      input: score, cutpoints: [c1, c2, ...]  value: bucket index
 
 Every gate has `on_uncertain`: "abstain" | "escalate" | "default" (with a
-`default` value); a gate is uncertain when the probability it acts on falls
-within `band` of `tau`, or an argmax/verify confidence check fails.
-Uncertainty is surfaced in `CircuitResult.outcome`, never silently resolved
-into a value.
+`default` value); uncertain when the probability it acts on is within
+`band` of `tau`, or an argmax/verify confidence check fails — surfaced in
+`CircuitResult.outcome`, never silently resolved into a value.
 """
 
 from __future__ import annotations
@@ -108,13 +95,24 @@ def result_key(result: CircuitResult) -> Any:
     return result.value if result.outcome in ("decided", "default") else result.outcome
 
 
+def threshold_decision(value: float | None, tau: float, *, band: float = 0.0) -> tuple[bool | None, bool]:
+    """(passes, uncertain). `value=None` -> `(None, False)`. Shared by
+    `gate.py`'s two named gates and this module's `threshold`/`not`/`and`/`or`."""
+    if value is None:
+        return None, False
+    return value >= tau, band > 0.0 and abs(value - tau) < band
+
+
+def _uncertain_note(uncertain: bool) -> str:
+    return " (uncertain)" if uncertain else ""
+
+
 def _noul_p(answers: dict[str, Answer], results: dict[str, CircuitResult], ref: str) -> tuple[float, str, bool]:
     if ref in results:
         r = results[ref]
         if r.p is None:
             raise CircuitError(f"gate {ref!r} carries no probability; use '{ref}:<value>'")
-        note = " (uncertain)" if r.uncertain else ""
-        return float(r.p), f"gate {ref} p={r.p:.2f}{note}", r.uncertain
+        return float(r.p), f"gate {ref} p={r.p:.2f}{_uncertain_note(r.uncertain)}", r.uncertain
     if ":" in ref:
         qid, opt = ref.split(":", 1)
         if qid in results:
@@ -122,8 +120,7 @@ def _noul_p(answers: dict[str, Answer], results: dict[str, CircuitResult], ref: 
             p = float(r.p if r.p is not None else 1.0)
             match = str(r.value) == opt
             pm = p if match else max(0.0, 1.0 - p)
-            note = " (uncertain)" if r.uncertain else ""
-            return pm, f"gate {qid}={r.value} -> P({opt})={pm:.2f}{note}", r.uncertain
+            return pm, f"gate {qid}={r.value} -> P({opt})={pm:.2f}{_uncertain_note(r.uncertain)}", r.uncertain
         a = answers[qid]
         if a.type in ("choice", "score") and a.probabilities:
             return float(a.probabilities[opt]), f"{qid}[{opt}] p={a.probabilities[opt]:.2f}", False
@@ -142,11 +139,7 @@ _COMBINE_NOTES = {
 
 
 def _combine(op: str, how: str, ps: list[float]) -> tuple[float, str]:
-    """Combine k probabilities under one of three t-norms: `product`
-    (independence), `weak` (idempotent — correlated inputs are not
-    double-counted), `strong` (saturating — a single near-0 input collapses
-    a strong AND to 0). `ps` is never empty: `__post_init__` requires
-    `inputs`."""
+    """`ps` is never empty: `__post_init__` requires `inputs`."""
     if how == "weak":
         p = min(ps) if op == "and" else max(ps)
     elif how == "strong":
@@ -184,11 +177,13 @@ def evaluate_gates(gates: dict[str, GateSpec], answers: dict[str, Answer]) -> di
         if g.op == "threshold":
             p, t, unc = _noul_p(answers, results, g.input)
             trace.append(t)
-            results[gid] = _settle(g, p >= g.tau, p, unc or abs(p - g.tau) < g.band, trace)
+            passes, band_unc = threshold_decision(p, g.tau, band=g.band)
+            results[gid] = _settle(g, passes, p, unc or band_unc, trace)
         elif g.op == "not":
             p, t, unc = _noul_p(answers, results, g.input)
             trace += [t, f"not -> p={1 - p:.2f}"]
-            results[gid] = _settle(g, (1 - p) >= g.tau, 1 - p, unc or abs((1 - p) - g.tau) < g.band, trace)
+            passes, band_unc = threshold_decision(1 - p, g.tau, band=g.band)
+            results[gid] = _settle(g, passes, 1 - p, unc or band_unc, trace)
         elif g.op in ("and", "or"):
             ps: list[float] = []
             unc = False
@@ -199,7 +194,8 @@ def evaluate_gates(gates: dict[str, GateSpec], answers: dict[str, Answer]) -> di
                 trace.append(t)
             p, note = _combine(g.op, g.combine, ps)
             trace.append(f"{g.op} {note} -> p={p:.2f}")
-            results[gid] = _settle(g, p >= g.tau, p, unc or abs(p - g.tau) < g.band, trace)
+            passes, band_unc = threshold_decision(p, g.tau, band=g.band)
+            results[gid] = _settle(g, passes, p, unc or band_unc, trace)
         elif g.op == "majority":
             votes: dict[str, list[float]] = {}
             for ref in g.inputs or []:

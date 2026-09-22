@@ -1,22 +1,12 @@
 """Typed-judge boundary: a swappable backend behind one `ask_all()` call.
-`JevEngine` is one implementation, not the contract — any engine that
-answers Noul/Choice/Score with a genuinely calibrated `confidence` (not a
-model's self-reported guess) can implement `JudgeEngine` and drop in, HTTP-
-backed or fully local. `gate.py`'s thresholds and `calibrate.py`'s refit
-only mean what they say against a confidence that was actually calibrated
-for this question shape; an engine that fakes it breaks that silently, not
-loudly, so this is a contract to honor deliberately, not a type checker
-will catch.
+`JevEngine` is one implementation, not the contract — any `JudgeEngine`
+must answer with a genuinely calibrated `confidence`, not a self-reported
+guess; `gate.py`/`calibrate.py` only mean what they say against that.
 
-`JevEngine` wraps the official `typesafe-sdk` client against the native
-TypeSafe API — retries, response validation, and error handling are
-maintained upstream instead of hand-rolled here. It journals nothing and
-tracks no usage itself; those are separate concerns (`journal.py`,
-`engine.py`) that compose around a plain `ask_all()` call rather than living
-inside it. `AskResult.model_revision` is the concrete version that actually
-answered (never a requested alias) — `journal.py` and `calibrate.py` key on
-it alongside `name` because a threshold is only valid for the specific
-engine+revision it was fit against.
+`JevEngine` wraps `typesafe-sdk` against the native TypeSafe API; it
+journals nothing and tracks no usage itself, that's `journal.py`/`engine.py`.
+`AskResult.model_revision` is the concrete version that answered (never a
+requested alias) — `journal.py` and `calibrate.py` key on it alongside `name`.
 """
 
 from __future__ import annotations

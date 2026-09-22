@@ -1,18 +1,10 @@
-"""Calibrated values -- a threshold float or a weight dict -- stored beside
-the journal under the same caller-configured `root`. Modeled on a sibling
-project's override-file pattern: one JSON object, read once per process with
-a cache, falls back to a caller's default on anything wrong with it (never
-raises on read -- an optional layer degrades, it doesn't break a live
-decision), written whole with provenance on every recalibration.
-
-One store, two producers: `calibrate.tighten_only_threshold()`'s scalar
-threshold and `calibrate.grid_search_weights()`'s weight dict are both plain
-JSON values keyed the same way, so they share one file and one class instead
-of two parallel persistence stories. Only the threshold path has a live
-consumer today (`engine.resolve_one()`); the weights path is wired to the
-same store and ready for whichever domain plugin's ranking logic needs it --
-see `calibrate.py`'s `grid_search_weights()` docstring for why that isn't
-built ahead of a real caller.
+"""A calibrated value — a threshold float or a weight dict — stored beside
+the journal under the same caller-configured `root`. One JSON file, cached
+per process, never raises on read (falls back to `default`), written whole
+with provenance. Threshold and weight values share this one store since
+they're both plain JSON values keyed the same way; see `calibrate.py`'s
+`grid_search_weights()` docstring for why the weight path has no consumer
+wired up yet.
 """
 
 from __future__ import annotations
@@ -26,6 +18,10 @@ CalibrationValue = float | dict[str, float]
 
 FILENAME = "calibration.json"
 SCHEMA = 1
+
+
+def _is_number(value: object) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
 class CalibrationStore:
@@ -64,10 +60,10 @@ class CalibrationStore:
             return default
         value = entry.get("value")
         if isinstance(default, dict):
-            if not (isinstance(value, dict) and all(isinstance(v, (int, float)) for v in value.values())):
+            if not (isinstance(value, dict) and all(_is_number(v) for v in value.values())):
                 return default
             return {k: float(v) for k, v in value.items()}
-        if not isinstance(value, (int, float)) or isinstance(value, bool):
+        if not _is_number(value):
             return default
         value = float(value)
         return value if 0.0 <= value <= 1.0 else default
@@ -76,21 +72,20 @@ class CalibrationStore:
         self, name: str, value: CalibrationValue, *, engine: str, model_revision: str | None = None,
         default: CalibrationValue, n: int, precision: float | None = None, note: str = "",
     ) -> Path | None:
-        """Write `value` as the new override. Raises `ValueError` for a
-        caller-passed value of the wrong shape or an out-of-range float --
-        that's a programming error, not malformed on-disk data. Never raises
-        on the write itself: an unwritable home degrades to `None`, same as
-        `Journal`'s write path."""
+        """Raises `ValueError` for a caller-passed value of the wrong shape
+        or an out-of-range float — a programming error, not malformed
+        on-disk data. Never raises on the write itself: an unwritable home
+        degrades to `None`, same as `Journal`'s write path."""
         if isinstance(value, dict):
-            if not all(isinstance(k, str) and isinstance(v, (int, float)) and not isinstance(v, bool) for k, v in value.items()):
+            if not all(isinstance(k, str) and _is_number(v) for k, v in value.items()):
                 raise ValueError(f"weight dict {value!r} must map str -> float")
             stored: CalibrationValue = {k: float(v) for k, v in value.items()}
-        elif isinstance(value, (int, float)) and not isinstance(value, bool):
+        elif _is_number(value):
             if not 0.0 <= value <= 1.0:
                 raise ValueError(f"threshold {value} outside [0, 1]")
             stored = float(value)
         else:
-            raise ValueError(f"value {value!r} must be a float or a dict[str, float]")  # noqa: TRY004
+            raise ValueError(f"value {value!r} must be a float or a dict[str, float]")
 
         entries = dict(self._load())
         entries[self.key(name, engine, model_revision)] = {

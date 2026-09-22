@@ -1,33 +1,18 @@
-"""Generic calibration utilities over plain journal rows, zero model calls:
+"""Calibration over plain journal rows, zero model calls.
 
-- `tighten_only_threshold` joins decision rows' answer confidence to their
-  outcome row's `verify_status` by `call_id`, sweeps ascending candidate
-  thresholds for the loosest one clearing a precision floor on enough
-  labeled rows, then only ever moves the incumbent threshold tighter unless
-  a caller passes a recorded `human_signoff`. A threshold is only valid for
-  the (engine, model_revision) it was fit against — pass either to isolate
-  one judge's data; otherwise every pair present is pooled and flagged in
-  the result if there's more than one.
+`tighten_only_threshold` sweeps candidate thresholds for the loosest one
+clearing a precision floor on enough labeled (confidence, verified) pairs,
+and only moves the incumbent tighter unless `human_signoff` is set.
+`grid_search_weights` grid-searches named weights against which half of
+each run's ranking actually saw the better outcome rate. `recalibrate` is
+the one function here that mutates anything: it applies a tightening
+threshold to a `CalibrationStore` automatically and journals every cycle.
+No `recalibrate_weights()` exists yet — nothing in this package's
+domain-blind core consumes a weight dict (repo-activity's own consumer is
+domain-specific ranking logic).
 
-- `grid_search_weights` grid-searches a set of named weights summing to 1,
-  scored against how many runs (each a list of per-item records with an
-  outcome field) a weighting would call "consistent" — its top-ranked
-  half's outcome rate meaningfully exceeding the bottom half's. Its output
-  is exactly as JSON-safe as a threshold and could persist through the same
-  `CalibrationStore` `recalibrate()` writes to, but nothing in this
-  package's domain-blind core consumes a weight dict yet (a weighted
-  ranking is domain-specific), so no `recalibrate_weights()` exists to
-  apply one automatically — building that ahead of a real caller would be
-  exactly the speculative work this package elsewhere avoids.
-
-- `recalibrate` is the one function here that mutates anything: it reads a
-  journal, refits `qid`'s threshold, and writes the result to a
-  `CalibrationStore` when it's safe to (a tightening move, always; a
-  loosening move, only with `human_signoff`) — the automatic-calibration
-  entry point `engine.resolve_one()`'s `store=` parameter reads back from.
-
-Every other function here degrades to a documented no-op on thin or
-malformed input rather than raising.
+Every other function degrades to a documented no-op on thin or malformed
+input rather than raising.
 """
 
 from __future__ import annotations
@@ -61,17 +46,11 @@ class ThresholdProposal:
 def _labeled_pairs(
     rows: list[dict], qid: str, *, engine: str | None = None, model_revision: str | None = None,
 ) -> tuple[list[tuple[float, bool]], set]:
-    """(confidence, verified) pairs: one per decision row's `qid` answer,
-    joined to its outcome row's `verify_status` by `call_id`. Rows without a
-    verify_status, or with "escalated"/"unconfirmed" (no ground truth to fit
-    against), are skipped. A threshold is only meaningful for the specific
-    (engine, model_revision) it was fit against — two different engines
-    could otherwise produce colliding `model_revision` strings — so both are
-    tracked together, not `model_revision` alone. When `engine`/
-    `model_revision` are given, only matching pairs are kept; either way,
-    every (engine, model_revision) pair actually present in the matched rows
-    is returned so a caller can tell whether it pooled across a model
-    change."""
+    """(confidence, verified) pairs joined by `call_id`, keyed on (engine,
+    model_revision) together — not model_revision alone, since two engines
+    could produce colliding revision strings. `engine`/`model_revision`
+    filter to one judge's data; either way, every pair actually present is
+    returned so a caller can tell whether it pooled across a model change."""
     verified_by_call: dict[str, bool] = {}
     for row in rows:
         if row.get("type") == "outcome" and row.get("verify_status") in ("verified", "failed"):
@@ -119,10 +98,8 @@ def _propose(
     min_precision: float = DEFAULT_MIN_PRECISION, min_labels: int = DEFAULT_MIN_LABELS,
     candidates: tuple[float, ...] = DEFAULT_CANDIDATE_THRESHOLDS,
 ) -> tuple[ThresholdProposal, bool]:
-    """The sweep, never raising: returns `(proposal, would_loosen)`, where
-    `proposal.proposed` is the swept value even when it would loosen —
-    `tighten_only_threshold()` and `recalibrate()` each decide what to do
-    with a loosening proposal, this just computes it."""
+    """The sweep, never raising: `(proposal, would_loosen)`. Callers decide
+    what to do with a loosening proposal; this just computes it."""
     pairs, revisions_seen = _labeled_pairs(rows, qid, engine=engine, model_revision=model_revision)
     proposed, n, precision, note = sweep_threshold(pairs, min_precision=min_precision, min_labels=min_labels, candidates=candidates)
     if engine is None and model_revision is None and len(revisions_seen) > 1:
@@ -139,14 +116,8 @@ def tighten_only_threshold(
     candidates: tuple[float, ...] = DEFAULT_CANDIDATE_THRESHOLDS, human_signoff: bool = False,
 ) -> ThresholdProposal:
     """Refit `qid`'s gate threshold from journal `rows`. Raises
-    `PromotionError` — instead of silently keeping `current` — when the
-    sweep proposes a looser threshold and `human_signoff` isn't set, so a
-    caller can't accidentally auto-apply a loosening it never reviewed.
-
-    `engine`/`model_revision` isolate one judge's confidence data; left
-    `None`, every (engine, model_revision) pair present is pooled and the
-    returned `note` flags it if there's more than one, since a threshold fit
-    against pooled data from different judges may not hold for either one."""
+    `PromotionError` instead of silently keeping `current` when the sweep
+    proposes a looser threshold and `human_signoff` isn't set."""
     proposal, would_loosen = _propose(
         rows, qid, current, engine=engine, model_revision=model_revision,
         min_precision=min_precision, min_labels=min_labels, candidates=candidates,
@@ -169,21 +140,13 @@ def recalibrate(
     default_threshold: float, min_precision: float = DEFAULT_MIN_PRECISION, min_labels: int = DEFAULT_MIN_LABELS,
     candidates: tuple[float, ...] = DEFAULT_CANDIDATE_THRESHOLDS, human_signoff: bool = False,
 ) -> RecalibrationResult:
-    """Refit `qid`'s threshold from the journal and apply it through `store`.
-    A tightening move applies automatically — tightening is safe by
-    construction, so it needs no human in the loop, which is what makes a
-    system built on this calibrate itself from what it logged. A loosening
-    move is never applied without `human_signoff`.
-
-    Unlike `tighten_only_threshold()` (which raises `PromotionError` for a
-    direct caller who should see that), `recalibrate()` never raises: the
-    sweep routinely proposes a value below a conservative incumbent even on
-    healthy data, and a driver meant to be called repeatedly can't have every
-    ordinary cycle raise. The refusal is recorded and the incumbent kept
-    instead — same "degrade, don't break the caller" rule as
-    `CalibrationStore`.
-
-    Every cycle is journaled, applied or not.
+    """Refit `qid`'s threshold from the journal and apply it through `store`:
+    a tightening move applies automatically, a loosening move only with
+    `human_signoff`. Unlike `tighten_only_threshold()`, never raises — a
+    driver meant to run repeatedly can't have every healthy cycle blow up
+    just because the sweep proposed below a conservative incumbent; the
+    refusal is recorded and the incumbent kept instead. Every cycle is
+    journaled, applied or not.
     """
     current = store.get(qid, engine=engine, model_revision=model_revision, default=default_threshold)
     rows = list(journal.replay())
@@ -191,7 +154,8 @@ def recalibrate(
         rows, qid, current, engine=engine, model_revision=model_revision,
         min_precision=min_precision, min_labels=min_labels, candidates=candidates,
     )
-    applied = proposal.proposed != current and not (would_loosen and not human_signoff)
+    applied = proposal.proposed != current and (not would_loosen or human_signoff)
+    resolved_threshold = proposal.proposed if applied else current
     if applied:
         store.set(
             qid, proposal.proposed, engine=engine, model_revision=model_revision,
@@ -199,10 +163,10 @@ def recalibrate(
         )
     journal.record_calibration(
         qid=qid, engine=engine, model_revision=model_revision, current=current,
-        proposed=proposal.proposed if applied else current, applied=applied,
+        proposed=resolved_threshold, applied=applied,
         n=proposal.n, precision=proposal.precision, human_signoff=human_signoff, note=proposal.note,
     )
-    return RecalibrationResult(proposal, applied, proposal.proposed if applied else current, proposal.note)
+    return RecalibrationResult(proposal, applied, resolved_threshold, proposal.note)
 
 
 def _grid(names: tuple[str, ...], step: float) -> list[dict[str, float]]:
