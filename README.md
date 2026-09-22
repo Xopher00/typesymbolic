@@ -24,7 +24,10 @@ re-tuning it by hand for every question the judge is asked.
 ## Core modules
 
 - **`engine.py`** — `resolve_one()`, the single-shot ODAV loop: observe,
-  propose candidates, ask the judge, gate, act, verify, journal.
+  propose candidates, ask the judge, gate, act, verify, journal. Also
+  `ask_batch()`, for a joint decision over several heterogeneous questions
+  judged together rather than one candidate picked from a set — gate each
+  answer independently with `circuit.evaluate_gates()`.
 - **`judge.py`** — the `JudgeEngine` protocol, a client for TypeSafe's Jev,
   a scripted fake for offline testing, and helpers for driving it from
   synchronous code.

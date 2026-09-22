@@ -1,11 +1,11 @@
 from typesymbolic.calibration_store import CalibrationStore
-from typesymbolic.circuit import GateSpec
+from typesymbolic.circuit import GateSpec, evaluate_gates, result_key
 from typesymbolic.domain import ActOutcome, Facts, Verdict
-from typesymbolic.engine import circuit_gate_extra, resolve_one
+from typesymbolic.engine import ask_batch, circuit_gate_extra, resolve_one
 from typesymbolic.gate import claim_gate, mutation_gate
 from typesymbolic.journal import Journal
 from typesymbolic.judge import ScriptedJudge
-from typesymbolic.question import Answer, Choice, Noul
+from typesymbolic.question import Answer, Choice, Noul, Score
 
 
 class Vocab:
@@ -272,3 +272,65 @@ async def test_circuit_gate_extra_works_with_mutation_gate_too():
 
     assert result.status == "deny"
     assert domain.acted_on is None
+
+
+async def test_ask_batch_journals_a_heterogeneous_batch_under_one_call_id(tmp_path):
+    journal = Journal(root=tmp_path)
+    judge = ScriptedJudge([{
+        "archetype": Answer.from_choice("archetype", "library", {"library": 0.9, "app": 0.1}, confidence=0.9),
+        "drift": Answer.from_noul("drift", 0.8),
+        "pollution": Answer.from_score("pollution", 0.0, {"0": "none"}, {"0": 1.0}, confidence=0.7),
+    }])
+    facts = Facts(state={"repo": "acme"})
+
+    call_id, result = await ask_batch(judge=judge, questions={
+        "archetype": Choice(instructions="what archetype?", criteria={"library": "a library", "app": "an app"}),
+        "drift": Noul(instructions="has effort drifted?"),
+        "pollution": Score(instructions="how polluted?", criteria=["none"]),
+    }, facts=facts, journal=journal, phase="route")
+
+    assert set(result.answers) == {"archetype", "drift", "pollution"}
+    journal.flush()
+    row = next(journal.replay())
+    assert row["type"] == "decision"
+    assert row["call_id"] == call_id
+    assert row["phase"] == "route"
+    assert set(row["answers"]) == {"archetype", "drift", "pollution"}
+
+
+async def test_ask_batch_without_a_journal_does_not_raise():
+    judge = ScriptedJudge([{"q": Answer.from_noul("q", 0.9)}])
+    call_id, result = await ask_batch(
+        judge=judge, questions={"q": Noul(instructions="?")}, facts=Facts(state={}),
+    )
+    assert result.answers["q"].noul == 0.9
+    assert call_id
+
+
+async def test_ask_batch_composes_with_evaluate_gates_for_a_routing_style_decision():
+    """The shape ask_batch() exists for: many heterogeneous questions about
+    one observation, each independently gated, with ordinary code routing
+    on the combination -- no single candidate, no act()/verify()."""
+    judge = ScriptedJudge([{
+        "use_recent": Answer.from_noul("use_recent", 0.9),
+        "gen_kind": Answer.from_choice("gen_kind", "generated", {"generated": 0.85, "hand_written": 0.15}, confidence=0.85),
+    }])
+    facts = Facts(state={"repo": "acme"})
+
+    call_id, result = await ask_batch(judge=judge, questions={
+        "use_recent": Noul(instructions="prioritize the recent window?"),
+        "gen_kind": Choice(instructions="what kind of file?", criteria={"generated": "generated", "hand_written": "hand-written"}),
+    }, facts=facts)
+
+    gates = {
+        "use_recent": GateSpec(op="threshold", input="use_recent", tau=0.5, band=0.0),
+        "drop_generated": GateSpec(op="confidence", input="gen_kind", min_confidence=0.8, band=0.0),
+    }
+    gated = evaluate_gates(gates, result.answers)
+
+    use_recent = result_key(gated["use_recent"]) is True
+    drop_generated = result_key(gated["drop_generated"]) == "generated"
+
+    assert call_id
+    assert use_recent is True
+    assert drop_generated is True

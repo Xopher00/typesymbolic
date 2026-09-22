@@ -20,7 +20,7 @@ from .calibrate import (
 from .calibration_store import CalibrationStore
 from .circuit import CircuitError, CircuitResult, GateSpec, evaluate_gates, result_key
 from .domain import ActOutcome, DomainAdapter, Facts, Verdict
-from .engine import ResolveResult, circuit_gate_extra, resolve_one
+from .engine import ResolveResult, ask_batch, circuit_gate_extra, resolve_one
 from .gate import GateResult, GateVerdict, claim_gate, mutation_gate
 from .journal import Journal
 from .judge import (
@@ -66,6 +66,7 @@ __all__ = [
     "Vocabulary",
     "VocabularyError",
     "ask_all_sync",
+    "ask_batch",
     "circuit_gate_extra",
     "claim_gate",
     "evaluate_gates",

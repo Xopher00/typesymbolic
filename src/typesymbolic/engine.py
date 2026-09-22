@@ -17,6 +17,20 @@ everything verified about it before now, not just whatever a caller
 remembered to recalibrate on a separate schedule. The freshness check costs
 a `flush()` (bounded by however far behind the write queue currently is,
 not by journal size) only on the call where it's actually needed.
+
+`resolve_one()` isn't the only shape a decision takes: it's "one Choice
+question, one gate, one act/verify" -- a joint decision over many
+heterogeneous questions judged together (a Noul, a Choice, several Scores,
+gated independently, with ordinary code then routing on the combination)
+has no single candidate to pick and no single act()/verify() step, so it
+doesn't fit `DomainAdapter` at all. `ask_batch()` is the piece of
+`resolve_one()` that *does* generalize to that case -- ask a named batch in
+one request, journal it under one `call_id` -- factored out so both
+callers share it rather than a batch caller reimplementing it inline. What
+doesn't generalize is left alone: gating a batch is `circuit.evaluate_gates()`,
+already built for exactly this; acting on the gated combination is
+domain-specific routing code with no shape in common across domains, so
+nothing here tries to generalize it.
 """
 
 from __future__ import annotations
@@ -32,8 +46,8 @@ from .circuit import GateSpec, evaluate_gates, result_key
 from .domain import ActOutcome, DomainAdapter, Facts, Verdict
 from .gate import GateResult, blocks_act, mutation_gate
 from .journal import Journal
-from .judge import JudgeEngine
-from .question import Answer, Choice, Noul
+from .judge import AskResult, JudgeEngine
+from .question import Answer, Choice, Noul, Question
 from .vocab import Vocabulary
 
 if TYPE_CHECKING:
@@ -49,6 +63,26 @@ class ResolveResult:
     gate_result: GateResult | None
     outcome: ActOutcome | None
     verdict: Verdict | None
+
+
+async def ask_batch(
+    *, judge: JudgeEngine, questions: dict[str, Question], facts: Facts,
+    journal: Journal | None = None, phase: str | None = None,
+) -> tuple[str, AskResult]:
+    """Ask a named batch of questions in one request and journal them
+    together under one fresh `call_id` -- the ask+journal step `resolve_one()`
+    does inline for its one-Choice case, shared here for a caller judging
+    many heterogeneous questions about the same `facts` together. Gating the
+    batch is `circuit.evaluate_gates(gates, result.answers)`; what happens
+    with the gated result is the caller's own domain logic."""
+    call_id = str(uuid.uuid4())
+    result = await judge.ask_all(facts.state, questions)
+    if journal is not None:
+        journal.record_decision(
+            call_id=call_id, engine=judge.name, phase=phase, answers=result.answers,
+            model_revision=result.model_revision,
+        )
+    return call_id, result
 
 
 async def resolve_one(
@@ -69,7 +103,7 @@ async def resolve_one(
     template = vocab.ask(qid, **(slots or {}))
     if not isinstance(template, Choice):
         raise TypeError(f"{qid}: resolve_one() drives a Choice question; vocab returned {type(template).__name__}")
-    questions = {qid: Choice(instructions=template.instructions, criteria=candidates)}
+    questions: dict[str, Question] = {qid: Choice(instructions=template.instructions, criteria=candidates)}
 
     if verify_qid is not None:
         verify_template = vocab.ask(verify_qid, **(slots or {}))
@@ -77,14 +111,9 @@ async def resolve_one(
             raise TypeError(f"{verify_qid}: verify_qid must be a Noul question; vocab returned {type(verify_template).__name__}")
         questions[verify_qid] = verify_template
 
-    result = await judge.ask_all(facts.state, questions)
+    call_id, result = await ask_batch(judge=judge, questions=questions, facts=facts, journal=journal, phase="decide")
     answer = result.answers[qid]
     verify_answer = result.answers.get(verify_qid) if verify_qid is not None else None
-    if journal is not None:
-        journal.record_decision(
-            call_id=call_id, engine=judge.name, phase="decide", answers=result.answers,
-            model_revision=result.model_revision,
-        )
 
     chosen_id = answer.choice
     if chosen_id not in candidates:
