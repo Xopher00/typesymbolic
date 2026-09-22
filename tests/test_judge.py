@@ -115,6 +115,29 @@ def test_ask_all_sync_runs_a_synchronous_judge_call():
     assert result.model_revision == "scripted"
 
 
+def test_ask_all_sync_reuses_the_same_event_loop_across_calls():
+    """Regression: a first implementation ran a fresh `asyncio.run()` per
+    call, which tears the loop down on return -- fine for `ScriptedJudge`
+    (holds no loop-bound resources) but broke a real `JevEngine` on its
+    second call (its connection pool bound to the first, now-closed loop)."""
+    from typesymbolic import judge as judge_module
+
+    questions = {"escalate": Noul(instructions="should we escalate?")}
+    judge = ScriptedJudge([
+        {"escalate": Answer.from_noul("escalate", 0.9)},
+        {"escalate": Answer.from_noul("escalate", 0.1)},
+    ])
+
+    ask_all_sync(judge, {"finding": "a"}, questions)
+    loop_after_first = judge_module._sync_loop
+    result = ask_all_sync(judge, {"finding": "b"}, questions)
+    loop_after_second = judge_module._sync_loop
+
+    assert loop_after_first is loop_after_second
+    assert not loop_after_second.is_closed()
+    assert result.answers["escalate"].noul == 0.1
+
+
 async def test_jev_engine_wraps_typesafe_error_as_cause():
     def handler(request: httpx2.Request) -> httpx2.Response:
         return httpx2.Response(401, json={"error": {"message": "bad key"}})

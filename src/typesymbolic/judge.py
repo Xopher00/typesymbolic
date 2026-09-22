@@ -12,6 +12,7 @@ requested alias) — `journal.py` and `calibrate.py` key on it alongside `name`.
 from __future__ import annotations
 
 import asyncio
+import threading
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -34,11 +35,35 @@ class JudgeEngine(Protocol):
     async def ask_all(self, state: dict, questions: dict[str, Question]) -> AskResult: ...
 
 
+_sync_loop: asyncio.AbstractEventLoop | None = None
+_sync_loop_lock = threading.Lock()
+
+
+def _get_sync_loop() -> asyncio.AbstractEventLoop:
+    """One event loop, lazily started on a daemon thread and reused for
+    every `ask_all_sync()` call for the rest of the process. `asyncio.run()`
+    per call tears the loop down on return; a judge holding a persistent
+    connection (`JevEngine`'s `AsyncTypeSafeClient`) binds its connection
+    pool to whichever loop was live when it made its first real request, so
+    a second `asyncio.run()` call hands that pool to an unrelated, already-
+    closed loop and crashes -- confirmed live against the real API, not
+    reproducible with a mock transport (no real socket ever binds to the
+    loop). One shared loop for the process's lifetime keeps the pool valid
+    across calls with no lifecycle API for the caller to manage."""
+    global _sync_loop
+    with _sync_loop_lock:
+        if _sync_loop is None:
+            _sync_loop = asyncio.new_event_loop()
+            threading.Thread(target=_sync_loop.run_forever, daemon=True).start()
+        return _sync_loop
+
+
 def ask_all_sync(judge: JudgeEngine, state: dict, questions: dict[str, Question]) -> AskResult:
-    """`ask_all()` from synchronous code, via `asyncio.run()` — for a caller
-    whose own control flow isn't async and shouldn't have to become so just
-    to reach `JudgeEngine`. Not for use inside a running event loop."""
-    return asyncio.run(judge.ask_all(state, questions))
+    """`ask_all()` from synchronous code — for a caller whose own control
+    flow isn't async and shouldn't have to become so just to reach
+    `JudgeEngine`. Safe to call repeatedly on the same judge instance; every
+    call runs on one shared background loop, see `_get_sync_loop()`."""
+    return asyncio.run_coroutine_threadsafe(judge.ask_all(state, questions), _get_sync_loop()).result()
 
 
 def _to_sdk_question(sdk, question: Question):
