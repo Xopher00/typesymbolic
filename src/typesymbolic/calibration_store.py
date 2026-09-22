@@ -36,14 +36,15 @@ class CalibrationStore:
         (`model_revision=None`) is stored and read back under the pooled key."""
         return f"{name}|{engine}|{model_revision or ''}"
 
-    def _path(self) -> Path:
+    @property
+    def path(self) -> Path:
         return self.root / FILENAME
 
     def _load(self) -> dict[str, dict]:
         if self._cache is not None:
             return self._cache
         self._cache = {}
-        path = self._path()
+        path = self.path
         if not path.exists():
             return self._cache
         try:
@@ -98,11 +99,11 @@ class CalibrationStore:
             self.root.mkdir(parents=True, exist_ok=True)
             tmp = self.root / f".{FILENAME}.{os.getpid()}.tmp"
             tmp.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-            os.replace(tmp, self._path())
+            os.replace(tmp, self.path)
         except OSError:
             return None
         self._cache = entries  # refill so this process sees its own write immediately
-        return self._path()
+        return self.path
 
     def get_n(self, name: str, *, engine: str, model_revision: str | None = None) -> int:
         """The label count `set()` last recorded for this key — the

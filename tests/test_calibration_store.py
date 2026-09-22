@@ -5,6 +5,14 @@ import pytest
 from typesymbolic.calibration_store import CalibrationStore
 
 
+def test_path_is_public_and_matches_where_set_writes(tmp_path):
+    store = CalibrationStore(root=tmp_path)
+    assert store.path == tmp_path / "calibration.json"
+    written = store.set("safe", 0.9, engine="jev", default=0.8, n=25, precision=0.96)
+    assert written == store.path
+    assert store.path.exists()
+
+
 def test_get_returns_default_on_unset_key(tmp_path):
     store = CalibrationStore(root=tmp_path)
     assert store.get("safe", engine="jev", default=0.8) == 0.8

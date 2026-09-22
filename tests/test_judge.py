@@ -34,6 +34,22 @@ def test_jev_engine_requires_api_key():
         JevEngine(api_key="")
 
 
+def test_jev_engine_forwards_retry_to_the_sdk_client(monkeypatch):
+    captured = {}
+    real_client = typesafe_sdk.AsyncTypeSafeClient
+
+    def spy(**kwargs):
+        captured.update(kwargs)
+        return real_client(**kwargs)
+
+    monkeypatch.setattr(typesafe_sdk, "AsyncTypeSafeClient", spy)
+    retry = typesafe_sdk.RetryPolicy(max_retries=5)
+
+    JevEngine(api_key="fake-key", retry=retry)
+
+    assert captured["retry"] is retry
+
+
 async def test_jev_engine_requires_at_least_one_question():
     engine = JevEngine(api_key="fake-key")
     with pytest.raises(JudgeError):

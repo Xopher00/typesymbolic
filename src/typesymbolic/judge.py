@@ -72,14 +72,17 @@ class JevEngine:
     name = "jev"
 
     def __init__(
-        self, api_key: str, model: str | None = None, *, timeout: float = 30.0, transport: object | None = None
+        self, api_key: str, model: str | None = None, *, timeout: float = 30.0,
+        transport: object | None = None, retry: object | None = None,
     ) -> None:
         if not api_key:
             raise JudgeError("TYPESAFE_AI_API is required")
         import typesafe_sdk  # optional dependency (pyproject's "jev" extra)
 
         self._sdk = typesafe_sdk
-        self._client = typesafe_sdk.AsyncTypeSafeClient(api_key=api_key, model=model, timeout=timeout, transport=transport)
+        self._client = typesafe_sdk.AsyncTypeSafeClient(
+            api_key=api_key, model=model, timeout=timeout, transport=transport, retry=retry,
+        )
 
     async def ask_all(self, state: dict, questions: dict[str, Question]) -> AskResult:
         if not questions:

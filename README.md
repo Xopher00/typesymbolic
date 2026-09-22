@@ -1,6 +1,6 @@
 # typesymbolic
 
-**Status: all core modules implemented, importable end to end, 143 tests
+**Status: all core modules implemented, importable end to end, 145 tests
 passing.** `judge.py`, `domain.py`, `gate.py`, `circuit.py`, `vocab.py`
 (`FrozenVocabulary`), `journal.py`, `calibrate.py`, `calibration_store.py`,
 and `engine.py`'s `resolve_one()` wire the whole ODAV loop together —
