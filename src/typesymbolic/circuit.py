@@ -21,6 +21,10 @@ answer's probability of one option, or an earlier gate id):
     verify     input: choice, check: noul  value: option, uncertain if
                P(check) < tau or confidence < min_confidence
     order      input: score, cutpoints: [c1, c2, ...]  value: bucket index
+    confidence input: any answer (noul/choice/score)   value: that answer's
+               own value, uncertain if confidence < min_confidence (banded)
+               -- argmax/verify's confidence floor, usable standalone for a
+               noul or score answer they don't cover
 
 Every gate has `on_uncertain`: "abstain" | "escalate" | "default" (with a
 `default` value); uncertain when the probability it acts on is within
@@ -35,7 +39,7 @@ from typing import Any
 
 from .question import Answer
 
-OPS = ("threshold", "not", "and", "or", "majority", "argmax", "verify", "order")
+OPS = ("threshold", "not", "and", "or", "majority", "argmax", "verify", "order", "confidence")
 POLICIES = ("abstain", "escalate", "default")
 OUTCOMES = ("decided", "abstain", "escalate", "default")
 COMBINES = ("product", "weak", "strong")
@@ -69,7 +73,7 @@ class GateSpec:
             raise CircuitError(f"combine must be one of {COMBINES}, got {self.combine!r}")
         if self.combine != "product" and self.op not in ("and", "or"):
             raise CircuitError(f"combine is only meaningful for 'and'/'or', not {self.op!r}")
-        if self.op in ("threshold", "not", "argmax", "verify", "order") and not self.input:
+        if self.op in ("threshold", "not", "argmax", "verify", "order", "confidence") and not self.input:
             raise CircuitError(f"gate op {self.op!r} needs `input`")
         if self.op in ("and", "or", "majority") and not self.inputs:
             raise CircuitError(f"gate op {self.op!r} needs `inputs`")
@@ -237,4 +241,11 @@ def evaluate_gates(gates: dict[str, GateSpec], answers: dict[str, Answer]) -> di
             near = any(abs(s - c) < g.band for c in cuts)
             trace.append(f"{g.input} score={s:.2f} cutpoints={cuts} -> bucket {bucket}" + (" (near a cutpoint)" if near else ""))
             results[gid] = _settle(g, bucket, None, near, trace, confidence=float(a.confidence))
+        elif g.op == "confidence":
+            a = answers[g.input]
+            conf = float(a.confidence)
+            value = a.noul if a.type == "noul" else a.choice if a.type == "choice" else a.score
+            passes, band_unc = threshold_decision(conf, g.min_confidence, band=g.band)
+            trace.append(f"{g.input} conf={conf:.2f} (min {g.min_confidence}){_uncertain_note(band_unc)}")
+            results[gid] = _settle(g, value, conf, not passes or band_unc, trace, confidence=conf)
     return results

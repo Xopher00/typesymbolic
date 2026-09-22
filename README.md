@@ -1,6 +1,6 @@
 # typesymbolic
 
-**Status: all core modules implemented, importable end to end, 136 tests
+**Status: all core modules implemented, importable end to end, 143 tests
 passing.** `judge.py`, `domain.py`, `gate.py`, `circuit.py`, `vocab.py`
 (`FrozenVocabulary`), `journal.py`, `calibrate.py`, `calibration_store.py`,
 and `engine.py`'s `resolve_one()` wire the whole ODAV loop together —
@@ -8,16 +8,28 @@ including two things that were previously built but not actually connected:
 `circuit.py`'s composable gates reach `resolve_one()` through
 `engine.circuit_gate_extra()`, and calibration is genuinely automatic, not
 just available: `Journal` writes through a background thread (no I/O on the
-decision path) and keeps a live per-question index; `resolve_one()`, given
-both `store=` and `journal=`, recalibrates a question's threshold inline —
-before gating on it — whenever that index shows something new since the
-threshold was last fit, so a fast, many-decisions-per-second caller (see
-`tests/test_selfcalibration.py`) never has to remember to call
-`calibrate.recalibrate()` itself. No real domain plugin exists yet — a
-jevdevice or repo-activity migration is a separate, explicitly-approved step
-(see CLAUDE.md) — the tests use fakes shaped after both real domains to
-validate the protocol shapes, not
-stand-ins for a migration.
+decision path) and keeps a live per-question index, rebuilt from whatever's
+already on disk at construction so a fresh-process-per-run caller (a CLI,
+not a long-lived daemon) still sees labels from its own prior runs;
+`resolve_one()`, given both `store=` and `journal=`, recalibrates a
+question's threshold inline — before gating on it — whenever that index
+shows something new since the threshold was last fit, so a fast,
+many-decisions-per-second caller (see `tests/test_selfcalibration.py`)
+never has to remember to call `calibrate.recalibrate()` itself.
+
+A migration-driven survey of `repo-activity` (a candidate first domain
+plugin, see CLAUDE.md) surfaced four gaps that were genuine core
+generality, not repo-activity-specific: a `circuit.confidence` op
+(confidence-gates any noul/choice/score answer, not just `argmax`/`verify`'s
+Choice case), `Journal.record_snapshot()` (an opaque, unindexed row for a
+domain whose durable record is a whole run's output rather than a
+per-decision label), the index-rebuild-on-construction above, and
+`judge.ask_all_sync()` (a synchronous `JudgeEngine.ask_all()` wrapper for a
+caller whose own control flow isn't async). No real domain plugin is wired
+up yet — an actual jevdevice or repo-activity migration is a separate,
+explicitly-approved step (see CLAUDE.md) — the tests use fakes shaped after
+both real domains to validate the protocol shapes, not stand-ins for a
+migration.
 
 ## What this is
 

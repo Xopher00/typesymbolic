@@ -91,6 +91,36 @@ def test_calibration_row_interleaved_does_not_disturb_replay_order(tmp_path):
     assert [r["type"] for r in rows] == ["decision", "calibration", "outcome"]
 
 
+def test_record_snapshot_round_trips_an_opaque_payload(tmp_path):
+    journal = Journal(root=tmp_path)
+    journal.record_snapshot(run_id="run-1", tags={"repo": "acme"}, payload={"top_files": ["a.py", "b.py"], "sha": "abc123"})
+
+    row = next(journal.replay())
+    assert row["type"] == "snapshot"
+    assert row["run_id"] == "run-1"
+    assert row["tags"] == {"repo": "acme"}
+    assert row["payload"] == {"top_files": ["a.py", "b.py"], "sha": "abc123"}
+
+
+def test_snapshot_rows_never_enter_the_labeled_index(tmp_path):
+    journal = Journal(root=tmp_path)
+    journal.record_snapshot(run_id="run-1", payload={"anything": True})
+    journal.flush()
+    assert journal.labeled_pairs("anything", engine="jev") == []
+
+
+def test_index_is_rebuilt_from_disk_on_construction(tmp_path):
+    first = Journal(root=tmp_path)
+    for i in range(3):
+        call_id = f"c{i}"
+        first.record_decision(call_id=call_id, engine="jev", phase="decide", model_revision="rev1", answers={"safe": Answer.from_noul("safe", 0.95)})
+        first.record_outcome(call_id=call_id, gate=GateResult(GateVerdict.ACT, "ok", 0.95), verdict=Verdict(status="verified"))
+    first.flush()
+
+    reopened = Journal(root=tmp_path)
+    assert len(reopened.labeled_pairs("safe", engine="jev", model_revision="rev1")) == 3
+
+
 def test_tighten_only_threshold_ignores_calibration_rows(tmp_path):
     from typesymbolic.calibrate import tighten_only_threshold
 

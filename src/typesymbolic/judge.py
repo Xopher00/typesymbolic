@@ -11,6 +11,7 @@ requested alias) — `journal.py` and `calibrate.py` key on it alongside `name`.
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -31,6 +32,13 @@ class JudgeEngine(Protocol):
     name: str
 
     async def ask_all(self, state: dict, questions: dict[str, Question]) -> AskResult: ...
+
+
+def ask_all_sync(judge: JudgeEngine, state: dict, questions: dict[str, Question]) -> AskResult:
+    """`ask_all()` from synchronous code, via `asyncio.run()` — for a caller
+    whose own control flow isn't async and shouldn't have to become so just
+    to reach `JudgeEngine`. Not for use inside a running event loop."""
+    return asyncio.run(judge.ask_all(state, questions))
 
 
 def _to_sdk_question(sdk, question: Question):

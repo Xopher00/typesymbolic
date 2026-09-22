@@ -23,7 +23,14 @@ from .domain import ActOutcome, DomainAdapter, Facts, Verdict
 from .engine import ResolveResult, circuit_gate_extra, resolve_one
 from .gate import GateResult, GateVerdict, claim_gate, mutation_gate
 from .journal import Journal
-from .judge import AskResult, JevEngine, JudgeEngine, JudgeError, ScriptedJudge
+from .judge import (
+    AskResult,
+    JevEngine,
+    JudgeEngine,
+    JudgeError,
+    ScriptedJudge,
+    ask_all_sync,
+)
 from .question import Answer, Choice, Noul, Question, Score
 from .vocab import FrozenVocabulary, Vocabulary, VocabularyError
 
@@ -56,6 +63,7 @@ __all__ = [
     "Verdict",
     "Vocabulary",
     "VocabularyError",
+    "ask_all_sync",
     "circuit_gate_extra",
     "claim_gate",
     "evaluate_gates",

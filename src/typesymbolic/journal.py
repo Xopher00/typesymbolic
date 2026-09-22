@@ -1,9 +1,10 @@
 """Append-only decision/outcome/calibration journal, domain-blind by
-construction — rows are ids, answers, and verdicts, never a domain payload
-(`record_outcome` reads `GateResult`/`ActOutcome`/`Verdict` directly, so
-`ActOutcome.detail` structurally never reaches a row). Storage root is
-caller-configured, not a hardcoded dotfile, since one install may back more
-than one domain package.
+construction — decision/outcome/calibration rows are ids, answers, and
+verdicts, never a domain payload (`record_outcome` reads
+`GateResult`/`ActOutcome`/`Verdict` directly, so `ActOutcome.detail`
+structurally never reaches a row); `record_snapshot()` is the deliberate
+exception, see below. Storage root is caller-configured, not a hardcoded
+dotfile, since one install may back more than one domain package.
 
 Writes go through a background thread over a queue, not inline: a
 `record_*` call only enqueues (no I/O on the caller's path), so a decision
@@ -19,6 +20,16 @@ drains, for the one place that needs a guaranteed-complete view rather than
 Concurrent writers are safe by row size, not by locking: one `open(..., "a")`
 + one short `write()` is atomic under O_APPEND because a row never carries a
 domain payload. No rotation or pruning — never needed in practice.
+
+`record_snapshot()` is the one row type this rule doesn't apply to: it holds
+a caller-opaque payload, written and replayed verbatim, never parsed or
+indexed — for a domain whose durable record is report-shaped (a whole run's
+output) rather than a per-decision (confidence, verified) pair.
+
+The live index is rebuilt from whatever's already on disk at construction,
+synchronously, before the writer thread starts — a fresh-process-per-run
+caller (a CLI, not a long-lived daemon) would otherwise never see labels
+from its own prior runs.
 """
 
 from __future__ import annotations
@@ -29,7 +40,7 @@ import threading
 from collections import defaultdict
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from .domain import ActOutcome, Verdict
@@ -39,6 +50,7 @@ if TYPE_CHECKING:
 DECISION = "decision"
 OUTCOME = "outcome"
 CALIBRATION = "calibration"
+SNAPSHOT = "snapshot"
 
 IndexKey = tuple[str, str, "str | None"]  # (qid, engine, model_revision)
 
@@ -57,11 +69,28 @@ class Journal:
         self._writer: threading.Thread | None = None
         if self.enabled:
             self.root.mkdir(parents=True, exist_ok=True)
+            self._rebuild_index()
             self._writer = threading.Thread(target=self._run_writer, daemon=True)
             self._writer.start()
 
     def _path(self) -> Path:
         return self.root / "journal.jsonl"
+
+    def _rebuild_index(self) -> None:
+        """Index whatever's already on disk, synchronously — reads the file
+        directly rather than through `replay()`, since `replay()` flushes
+        the queue and the writer thread isn't running yet at this point."""
+        path = self._path()
+        if not path.exists():
+            return
+        with open(path, encoding="utf-8") as handle:
+            for line in handle:
+                if not line.strip():
+                    continue
+                try:
+                    self._index_row(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
 
     def _run_writer(self) -> None:
         while True:
@@ -148,6 +177,12 @@ class Journal:
             "current": current, "proposed": proposed, "applied": applied,
             "n": n, "precision": precision, "human_signoff": human_signoff, "note": note,
         })
+
+    def record_snapshot(self, *, run_id: str, tags: dict | None = None, payload: Any) -> None:
+        """Opaque per-run payload — written and replayed verbatim, never
+        parsed or indexed. `payload` is domain-shaped by design; unlike
+        every other row type here, it may carry raw domain data."""
+        self._append(SNAPSHOT, {"run_id": run_id, "tags": tags or {}, "payload": payload})
 
     def replay(self):
         """Every row in write order, from disk — flushes first, so this

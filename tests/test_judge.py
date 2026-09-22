@@ -2,7 +2,7 @@ import httpx2
 import pytest
 import typesafe_sdk
 
-from typesymbolic.judge import JevEngine, JudgeError, ScriptedJudge
+from typesymbolic.judge import JevEngine, JudgeError, ScriptedJudge, ask_all_sync
 from typesymbolic.question import Answer, Choice, Noul, Score
 
 
@@ -87,6 +87,16 @@ async def test_jev_engine_raises_judge_error_on_api_failure():
     engine = JevEngine(api_key="fake-key", transport=httpx2.MockTransport(handler))
     with pytest.raises(JudgeError):
         await engine.ask_all({}, {"q": Noul(instructions="?")})
+
+
+def test_ask_all_sync_runs_a_synchronous_judge_call():
+    questions = {"escalate": Noul(instructions="should we escalate?")}
+    judge = ScriptedJudge([{"escalate": Answer.from_noul("escalate", 0.9)}])
+
+    result = ask_all_sync(judge, {"finding": "a"}, questions)
+
+    assert result.answers["escalate"].noul == 0.9
+    assert result.model_revision == "scripted"
 
 
 async def test_jev_engine_wraps_typesafe_error_as_cause():

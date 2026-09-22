@@ -204,3 +204,27 @@ def test_gate_spec_rejects_unknown_combine():
 def test_gate_spec_rejects_combine_on_a_non_boolean_op():
     with pytest.raises(CircuitError):
         GateSpec(op="threshold", input="a", combine="weak")
+
+
+def test_confidence_passes_a_noul_above_min_confidence():
+    answers = {"safe": Answer.from_noul("safe", 0.05)}  # confidence = abs(0.05-0.5)*2 = 0.9
+    gates = {"g": GateSpec(op="confidence", input="safe", min_confidence=0.5, band=0.0)}
+    results = evaluate_gates(gates, answers)
+    assert results["g"].value == 0.05
+    assert results["g"].outcome == "decided"
+
+
+def test_confidence_abstains_below_min_confidence():
+    answers = {"pick": Answer.from_choice("pick", "billing", {"billing": 0.55, "technical": 0.45}, confidence=0.55)}
+    gates = {"g": GateSpec(op="confidence", input="pick", min_confidence=0.8, band=0.0)}
+    results = evaluate_gates(gates, answers)
+    assert results["g"].uncertain is True
+    assert results["g"].outcome == "abstain"
+
+
+def test_confidence_surfaces_a_score_answers_own_value():
+    answers = {"risk": Answer.from_score("risk", 1.9, {"0": "low", "1": "medium", "2": "high"}, {"0": 0.05, "1": 0.15, "2": 0.8}, confidence=0.8)}
+    gates = {"g": GateSpec(op="confidence", input="risk", min_confidence=0.5)}
+    results = evaluate_gates(gates, answers)
+    assert results["g"].value == 1.9
+    assert results["g"].outcome == "decided"
