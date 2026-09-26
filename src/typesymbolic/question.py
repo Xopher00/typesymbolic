@@ -4,9 +4,12 @@ for free text, only one of these closed shapes.
 
 from __future__ import annotations
 
+import math
 from typing import Literal
 
 from pydantic import BaseModel, Field
+
+from .errors import TypesymbolicError
 
 
 class NoulCriteria(BaseModel):
@@ -125,3 +128,64 @@ class Answer(BaseModel):
             qid=qid, type="score", score=score, legend=legend, probabilities=probabilities, confidence=confidence,
             abstained=abstained,
         )
+
+
+class InvalidAnswerError(TypesymbolicError, ValueError):
+    """A judge answer that contradicts its own question or distribution."""
+
+
+# Absolute slack for sums and means; outside it an answer is rejected, never renormalized.
+ANSWER_TOLERANCE = 1e-6
+
+
+def _rounding_error(decimals: int | None) -> float:
+    if decimals is None:
+        return 0.0
+    if not 0 <= decimals <= 15:
+        raise ValueError(f"rounding decimals must be in [0, 15], got {decimals}")
+    return 0.5 * 10.0**-decimals
+
+
+def _is_probability(value: object) -> bool:
+    return isinstance(value, (int, float)) and math.isfinite(value) and 0.0 <= value <= 1.0
+
+
+def _check_distribution(qid: str, probabilities: dict[str, float], keys: list[str], rounding_error: float) -> None:
+    if set(probabilities) != set(keys) or not all(_is_probability(p) for p in probabilities.values()):
+        raise InvalidAnswerError(f"{qid}: needs a complete distribution of finite probabilities in [0, 1]")
+    if abs(sum(probabilities.values()) - 1.0) > ANSWER_TOLERANCE + len(keys) * rounding_error:
+        raise InvalidAnswerError(f"{qid}: probabilities must sum to 1 within the declared rounding")
+
+
+def validate_answer(
+    question: Question, answer: Answer, *, probability_decimals: int | None = None, score_decimals: int | None = None,
+) -> None:
+    """Raise `InvalidAnswerError` unless `answer` is consistent with `question`.
+    `*_decimals` declare the judge's output rounding (half a unit of slack per rounded value);
+    `None` means unrounded."""
+    qid = answer.qid
+    if answer.type != question.type:
+        raise InvalidAnswerError(f"{qid}: {answer.type} answer to a {question.type} question")
+    p_err, s_err = _rounding_error(probability_decimals), _rounding_error(score_decimals)
+    if isinstance(question, Noul):
+        if not _is_probability(answer.noul):
+            raise InvalidAnswerError(f"{qid}: noul must be a finite probability in [0, 1]")
+    elif isinstance(question, Choice):
+        if answer.choice not in question.criteria:
+            raise InvalidAnswerError(f"{qid}: selected unknown option {answer.choice!r}")
+        if answer.probabilities is not None:
+            _check_distribution(qid, answer.probabilities, list(question.criteria), p_err)
+            selected = answer.probabilities[answer.choice]
+            if any(p > selected + ANSWER_TOLERANCE for p in answer.probabilities.values()):
+                raise InvalidAnswerError(f"{qid}: did not select a highest-probability option")
+    else:
+        top = len(question.criteria) - 1
+        if not (isinstance(answer.score, (int, float)) and math.isfinite(answer.score) and 0 <= answer.score <= top):
+            raise InvalidAnswerError(f"{qid}: score must be in [0, {top}]")
+        if answer.probabilities is not None:
+            keys = [str(i) for i in range(len(question.criteria))]
+            _check_distribution(qid, answer.probabilities, keys, p_err)
+            mean = sum(int(k) * p for k, p in answer.probabilities.items())
+            mean_slack = ANSWER_TOLERANCE + sum(range(len(keys))) * p_err + s_err
+            if abs(mean - answer.score) > mean_slack:
+                raise InvalidAnswerError(f"{qid}: score must equal the probability-weighted mean")

@@ -38,12 +38,14 @@ from .labels import LabelIndex
 from .question import (
     Answer,
     Choice,
+    InvalidAnswerError,
     Noul,
     NoulCriteria,
     Question,
     QuestionRef,
     Scale,
     Score,
+    validate_answer,
 )
 from .vocab import (
     FrozenVocabulary,
@@ -69,6 +71,7 @@ __all__ = [
     "GateResult",
     "GateSpec",
     "GateVerdict",
+    "InvalidAnswerError",
     "JevEngine",
     "Journal",
     "JudgeEngine",
@@ -104,4 +107,5 @@ __all__ = [
     "result_key",
     "tighten_only_threshold",
     "unit_name",
+    "validate_answer",
 ]

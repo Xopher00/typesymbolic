@@ -104,7 +104,7 @@ async def test_jev_engine_parses_all_three_answer_shapes():
                     "escalate": {"type": "noul", "noul": 0.91},
                     "category": {"type": "choice", "choice": "auth", "probabilities": {"auth": 0.95, "other": 0.05}, "confidence": 0.95},
                     "severity": {
-                        "type": "score", "score": 1.98,
+                        "type": "score", "score": 1.86,
                         "legend": {0: "low", 1: "medium", 2: "high"},
                         "probabilities": {0: 0.02, 1: 0.1, 2: 0.88},
                         "confidence": 0.98,
@@ -128,7 +128,7 @@ async def test_jev_engine_parses_all_three_answer_shapes():
     assert answers["escalate"].confidence is None
     assert answers["category"].choice == "auth"
     assert answers["category"].confidence == 0.95
-    assert answers["severity"].score == 1.98
+    assert answers["severity"].score == 1.86
     assert answers["severity"].confidence == 0.98
     assert answers["severity"].legend == {"0": "low", "1": "medium", "2": "high"}
 

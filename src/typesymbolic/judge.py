@@ -20,7 +20,15 @@ from dataclasses import dataclass
 from typing import Protocol, Self
 
 from .errors import TypesymbolicError
-from .question import Answer, Choice, Noul, Question, Score
+from .question import (
+    Answer,
+    Choice,
+    InvalidAnswerError,
+    Noul,
+    Question,
+    Score,
+    validate_answer,
+)
 
 
 class JudgeError(TypesymbolicError, RuntimeError):
@@ -116,6 +124,10 @@ def _default_retry(sdk):
     return sdk.RetryPolicy(max_retries=2, http_statuses={429, 529}, backoff_initial=1.0, backoff_jitter=0.0)
 
 
+# Jev rounds probabilities and scores to 2 decimals (the same declaration Vercel's @ai-sdk/typesafe-ai makes).
+JEV_DECIMALS = 2
+
+
 class JevEngine:
     """Jev over the native TypeSafe API. One request per `ask_all()` call
     -- batch questions rather than calling repeatedly."""
@@ -146,6 +158,13 @@ class JevEngine:
             raise JudgeError(f"Jev request failed ({type(error).__name__}: {error})") from error
         elapsed_ms = (time.perf_counter() - started) * 1000
         answers = {qid: _from_sdk_answer(qid, answer) for qid, answer in response.answers.items()}
+        if set(answers) != set(questions):
+            raise JudgeError(f"Jev answered {sorted(answers)}, asked {sorted(questions)}")
+        try:
+            for qid, answer in answers.items():
+                validate_answer(questions[qid], answer, probability_decimals=JEV_DECIMALS, score_decimals=JEV_DECIMALS)
+        except InvalidAnswerError as error:
+            raise JudgeError(f"Jev returned an inconsistent answer ({error})") from error
         usage = {"input_tokens": response.usage.input_tokens, "output_tokens": response.usage.output_tokens}
         return AskResult(answers=answers, model_revision=response.model, usage=usage, elapsed_ms=elapsed_ms)
 

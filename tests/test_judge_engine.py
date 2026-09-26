@@ -110,7 +110,7 @@ async def test_wire_body_keeps_undescribed_choice_labels_as_null():
 
     def handler(request: httpx2.Request) -> httpx2.Response:
         captured["body"] = json.loads(request.content)
-        return _ok_response()
+        return _ok_response(answers={"q": {"type": "choice", "choice": "pkg.b", "probabilities": {"pkg.a": 0.1, "pkg.b": 0.9}, "confidence": 0.9}})
 
     engine = JevEngine(api_key="fake-key", model="jev-1.13.0", transport=httpx2.MockTransport(handler))
     question = Choice(instructions="pick one", criteria={"pkg.a": None, "pkg.b": "described"})
@@ -128,7 +128,7 @@ async def test_wire_body_score_shape_is_the_ordered_criteria_list():
 
     def handler(request: httpx2.Request) -> httpx2.Response:
         captured["body"] = json.loads(request.content)
-        return _ok_response()
+        return _ok_response(answers={"q": {"type": "score", "score": 0.8, "legend": {0: "low", 1: "high"}, "probabilities": {0: 0.2, 1: 0.8}, "confidence": 0.6}})
 
     engine = JevEngine(api_key="fake-key", model="jev-1.13.0", transport=httpx2.MockTransport(handler))
     question = Score(instructions="rate it", criteria=["low", "high"])
@@ -139,3 +139,18 @@ async def test_wire_body_score_shape_is_the_ordered_criteria_list():
         "instructions": "rate it",
         "criteria": ["low", "high"],
     }
+
+
+async def test_jev_engine_rejects_an_inconsistent_answer_as_a_judge_error():
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        return _ok_response(answers={"q": {"type": "choice", "choice": "nope", "probabilities": {"a": 1.0}, "confidence": 1.0}})
+
+    engine = JevEngine(api_key="fake-key", transport=httpx2.MockTransport(handler))
+    with pytest.raises(JudgeError, match="unknown option"):
+        await engine.ask_all({}, {"q": Choice(instructions="pick", criteria={"a": None})})
+
+
+async def test_jev_engine_rejects_a_missing_answer():
+    engine = JevEngine(api_key="fake-key", transport=httpx2.MockTransport(lambda request: _ok_response()))
+    with pytest.raises(JudgeError, match="answered"):
+        await engine.ask_all({}, {"q": Noul(instructions="?"), "extra": Noul(instructions="?")})
