@@ -1,12 +1,9 @@
-"""Composable gates over calibrated `Answer`s — AND/OR/NOT, majority vote,
-verify, ordinal bucketing. `gate.py` stays the simple, common-case entry
-point; this module is for a decision that needs more than one threshold.
+"""Composable gates over calibrated `Answer`s -- AND/OR/NOT, majority vote,
+verify, ordinal bucketing; for a decision needing more than one threshold
+(`gate.py` covers the single-threshold case).
 
-A `GateSpec` reads one or more answer ids, or an earlier gate id in the same
-circuit (a small DAG, not a flat list), and produces a `CircuitResult`.
-
-Ops (`input`/`inputs` is an answer id, "answer_id:option" for a choice/score
-answer's probability of one option, or an earlier gate id):
+A `GateSpec` reads answer ids, "answer_id:option" for a choice/score
+option's probability, or an earlier gate id (a small DAG). Ops:
 
     threshold  input: noul               value: bool, passes if p >= tau
     not        input: noul                value: bool, p = 1 - p_in
@@ -21,15 +18,12 @@ answer's probability of one option, or an earlier gate id):
     verify     input: choice, check: noul  value: option, uncertain if
                P(check) < tau or confidence < min_confidence
     order      input: score, cutpoints: [c1, c2, ...]  value: bucket index
-    confidence input: any answer (noul/choice/score)   value: that answer's
+    confidence input: any answer                       value: that answer's
                own value, uncertain if confidence < min_confidence (banded)
-               -- argmax/verify's confidence floor, usable standalone for a
-               noul or score answer they don't cover
 
 Every gate has `on_uncertain`: "abstain" | "escalate" | "default" (with a
-`default` value); uncertain when the probability it acts on is within
-`band` of `tau`, or an argmax/verify confidence check fails — surfaced in
-`CircuitResult.outcome`, never silently resolved into a value.
+`default` value), surfaced in `CircuitResult.outcome`, never silently
+resolved into a value.
 """
 
 from __future__ import annotations
@@ -37,6 +31,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from .errors import TypesymbolicError
 from .question import Answer
 
 OPS = ("threshold", "not", "and", "or", "majority", "argmax", "verify", "order", "confidence")
@@ -45,7 +40,7 @@ OUTCOMES = ("decided", "abstain", "escalate", "default")
 COMBINES = ("product", "weak", "strong")
 
 
-class CircuitError(ValueError):
+class CircuitError(TypesymbolicError, ValueError):
     """A gate spec was malformed, or referenced an answer that doesn't fit
     the op (e.g. `majority` over a non-choice answer)."""
 
@@ -243,8 +238,12 @@ def evaluate_gates(gates: dict[str, GateSpec], answers: dict[str, Answer]) -> di
             results[gid] = _settle(g, bucket, None, near, trace, confidence=float(a.confidence))
         elif g.op == "confidence":
             a = answers[g.input]
-            conf = float(a.confidence)
             value = a.noul if a.type == "noul" else a.choice if a.type == "choice" else a.score
+            if a.confidence is None:
+                trace.append(f"{g.input} carries no confidence")
+                results[gid] = _settle(g, value, None, True, trace, confidence=None)
+                continue
+            conf = float(a.confidence)
             passes, band_unc = threshold_decision(conf, g.min_confidence, band=g.band)
             trace.append(f"{g.input} conf={conf:.2f} (min {g.min_confidence}){_uncertain_note(band_unc)}")
             results[gid] = _settle(g, value, conf, not passes or band_unc, trace, confidence=conf)

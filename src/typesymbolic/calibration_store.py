@@ -1,18 +1,15 @@
-"""A calibrated value — a threshold float or a weight dict — stored beside
-the journal under the same caller-configured `root`. One JSON file, cached
-per process, never raises on read (falls back to `default`), written whole
-with provenance. Threshold and weight values share this one store since
-they're both plain JSON values keyed the same way; see `calibrate.py`'s
-`grid_search_weights()` docstring for why the weight path has no consumer
-wired up yet.
+"""A calibrated value -- threshold float or weight dict -- in one JSON
+file, cached per process. Never raises on read; falls back to `default`.
+Written whole, with provenance.
 """
 
 from __future__ import annotations
 
 import json
-import os
 from datetime import UTC, datetime
 from pathlib import Path
+
+from ._io import atomic_write
 
 CalibrationValue = float | dict[str, float]
 
@@ -31,17 +28,17 @@ class CalibrationStore:
 
     @staticmethod
     def key(name: str, engine: str, model_revision: str | None) -> str:
-        """Valid only for the (engine, model_revision) it was fit against —
-        `calibrate.py` keys its pairs the same way; a pooled fit
-        (`model_revision=None`) is stored and read back under the pooled key."""
+        """A pooled fit (`model_revision=None`) reads/writes the pooled key."""
         return f"{name}|{engine}|{model_revision or ''}"
 
     @property
     def path(self) -> Path:
         return self.root / FILENAME
 
-    def _load(self) -> dict[str, dict]:
-        if self._cache is not None:
+    def _load(self, *, force: bool = False) -> dict[str, dict]:
+        """`force=True` re-reads from disk even if cached -- `set()` needs
+        this to avoid clobbering another process's write."""
+        if self._cache is not None and not force:
             return self._cache
         self._cache = {}
         path = self.path
@@ -73,10 +70,8 @@ class CalibrationStore:
         self, name: str, value: CalibrationValue, *, engine: str, model_revision: str | None = None,
         default: CalibrationValue, n: int, precision: float | None = None, note: str = "",
     ) -> Path | None:
-        """Raises `ValueError` for a caller-passed value of the wrong shape
-        or an out-of-range float — a programming error, not malformed
-        on-disk data. Never raises on the write itself: an unwritable home
-        degrades to `None`, same as `Journal`'s write path."""
+        """Raises `ValueError` on a malformed `value`. Never raises on the
+        write itself -- an unwritable home degrades to `None`."""
         if isinstance(value, dict):
             if not all(isinstance(k, str) and _is_number(v) for k, v in value.items()):
                 raise ValueError(f"weight dict {value!r} must map str -> float")
@@ -88,7 +83,7 @@ class CalibrationStore:
         else:
             raise ValueError(f"value {value!r} must be a float or a dict[str, float]")
 
-        entries = dict(self._load())
+        entries = dict(self._load(force=True))
         entries[self.key(name, engine, model_revision)] = {
             "name": name, "engine": engine, "model_revision": model_revision,
             "value": stored, "default": default, "n": n, "precision": precision,
@@ -96,19 +91,14 @@ class CalibrationStore:
         }
         record = {"schema": SCHEMA, "entries": entries}
         try:
-            self.root.mkdir(parents=True, exist_ok=True)
-            tmp = self.root / f".{FILENAME}.{os.getpid()}.tmp"
-            tmp.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-            os.replace(tmp, self.path)
+            atomic_write(self.path, (json.dumps(record, indent=2, sort_keys=True) + "\n").encode("utf-8"))
         except OSError:
             return None
         self._cache = entries  # refill so this process sees its own write immediately
         return self.path
 
     def get_n(self, name: str, *, engine: str, model_revision: str | None = None) -> int:
-        """The label count `set()` last recorded for this key — the
-        watermark a caller compares against fresh data to decide whether a
-        refit is warranted. 0 if never set."""
+        """The label count `set()` last recorded for this key; 0 if never set."""
         entry = self._load().get(self.key(name, engine, model_revision))
         n = entry.get("n") if entry else None
         return n if isinstance(n, int) and not isinstance(n, bool) else 0

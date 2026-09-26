@@ -1,3 +1,5 @@
+import pytest
+
 from typesymbolic.gate import GateVerdict, claim_gate, mutation_gate
 
 
@@ -43,9 +45,15 @@ def test_claim_gate_hedges_below_threshold():
     assert result.verdict == GateVerdict.HEDGE
 
 
-def test_claim_gate_publishes_with_no_confidence_to_gate():
+def test_claim_gate_hedges_with_no_confidence_to_gate():
     result = claim_gate(confidence=None, threshold=0.8)
-    assert result.verdict == GateVerdict.PUBLISH
+    assert result.verdict == GateVerdict.HEDGE
+    assert result.reason == "no confidence to gate"
+
+
+def test_mutation_gate_needs_approval_with_no_confidence_to_gate():
+    result = mutation_gate(confidence=None, threshold=0.8)
+    assert result.verdict == GateVerdict.NEEDS_APPROVAL
     assert result.reason == "no confidence to gate"
 
 
@@ -84,3 +92,16 @@ def test_claim_gate_on_uncertain_overrides_the_default_escalation():
 def test_on_uncertain_none_keeps_old_behavior():
     result = mutation_gate(confidence=0.5, threshold=0.8, on_uncertain=None)
     assert result.verdict == GateVerdict.NEEDS_APPROVAL
+
+
+def test_mutation_gate_rejects_an_unknown_on_uncertain_verdict():
+    """An unrecognized on_uncertain value raises immediately, rather than
+    settling to a verdict blocks_act() would not recognize and letting a
+    low-confidence pick through to act()."""
+    with pytest.raises(ValueError, match="on_uncertain"):
+        mutation_gate(confidence=0.5, threshold=0.8, on_uncertain="aprove")
+
+
+def test_claim_gate_rejects_an_unknown_on_uncertain_verdict():
+    with pytest.raises(ValueError, match="on_uncertain"):
+        claim_gate(confidence=0.5, threshold=0.8, on_uncertain="typo")

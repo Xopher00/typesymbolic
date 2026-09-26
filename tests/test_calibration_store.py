@@ -112,3 +112,18 @@ def test_all_returns_every_stored_value(tmp_path):
     store.set("a", 0.9, engine="jev", default=0.8, n=25, precision=1.0)
     store.set("b", 0.7, engine="jev", default=0.8, n=25, precision=1.0)
     assert len(store.all()) == 2
+
+
+def test_set_does_not_lose_another_process_key_written_after_this_ones_first_load(tmp_path):
+    """set() force-reloads from disk before merging, so a second store
+    instance's write does not overwrite what the first instance wrote."""
+    first = CalibrationStore(root=tmp_path)
+    second = CalibrationStore(root=tmp_path)
+    first.get("a", engine="jev", default=0.5)  # populates first's cache with an empty store
+    second.set("a", 0.9, engine="jev", default=0.8, n=25, precision=1.0)  # written after first's cache was filled
+
+    first.set("b", 0.7, engine="jev", default=0.8, n=25, precision=1.0)
+
+    reread = CalibrationStore(root=tmp_path)
+    assert reread.get("a", engine="jev", default=0.5) == 0.9
+    assert reread.get("b", engine="jev", default=0.5) == 0.7

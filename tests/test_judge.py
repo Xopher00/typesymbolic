@@ -4,6 +4,8 @@ import httpx2
 import pytest
 import typesafe_sdk
 
+from typesymbolic.domain import Facts
+from typesymbolic.journal import Journal
 from typesymbolic.judge import (
     AskResult,
     JevEngine,
@@ -12,7 +14,7 @@ from typesymbolic.judge import (
     SyncJevSession,
     ask_all_sync,
 )
-from typesymbolic.question import Answer, Choice, Noul, Score
+from typesymbolic.question import Answer, Choice, Noul, QuestionRef, Score
 
 
 async def test_scripted_judge_returns_script_entries_in_order():
@@ -65,6 +67,32 @@ async def test_jev_engine_requires_at_least_one_question():
         await engine.ask_all({}, {})
 
 
+async def test_jev_engine_forwards_noul_criteria_on_the_wire():
+    import json
+
+    from typesymbolic.question import NoulCriteria
+
+    captured = {}
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        captured["body"] = json.loads(request.content)
+        return httpx2.Response(
+            200,
+            json={
+                "model": "jev-latest",
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+                "answers": {"safe": {"type": "noul", "noul": 0.5}},
+            },
+        )
+
+    engine = JevEngine(api_key="fake-key", transport=httpx2.MockTransport(handler))
+    question = Noul(instructions="is this safe?", criteria=NoulCriteria(true="yes", false="no"))
+
+    await engine.ask_all({"x": 1}, {"safe": question})
+
+    assert captured["body"]["questions"]["safe"]["criteria"] == {"true": "yes", "false": "no"}
+
+
 async def test_jev_engine_parses_all_three_answer_shapes():
     def handler(request: httpx2.Request) -> httpx2.Response:
         return httpx2.Response(
@@ -97,7 +125,7 @@ async def test_jev_engine_parses_all_three_answer_shapes():
 
     assert result.model_revision == "jev-latest"
     assert answers["escalate"].noul == 0.91
-    assert answers["escalate"].confidence == pytest.approx(abs(0.91 - 0.5) * 2)
+    assert answers["escalate"].confidence is None
     assert answers["category"].choice == "auth"
     assert answers["category"].confidence == 0.95
     assert answers["severity"].score == 1.98
@@ -208,3 +236,47 @@ async def test_jev_engine_wraps_typesafe_error_as_cause():
         pytest.fail("expected JudgeError")
     except JudgeError as error:
         assert isinstance(error.__cause__, typesafe_sdk.TypeSafeError)
+
+
+def test_sync_jev_session_ask_batch_journals_the_decision_with_refs(tmp_path):
+    judge = ScriptedJudge([{"escalate": Answer.from_noul("escalate", 0.9)}])
+    questions = {"escalate": Noul(instructions="should we escalate?")}
+    facts = Facts(state={"finding": "a"})
+    refs = {"escalate": QuestionRef(qid="escalate", group="escalate", scale="noul_p")}
+    journal = Journal(root=tmp_path, background_writes=False)
+
+    with SyncJevSession(judge) as session:
+        call_id, result = session.ask_batch(questions, facts, journal=journal, phase="decide", refs=refs)
+
+    assert result.answers["escalate"].noul == 0.9
+    rows = list(journal.replay())
+    assert len(rows) == 1
+    assert rows[0]["call_id"] == call_id
+    assert rows[0]["questions"]["escalate"]["qid"] == "escalate"
+
+
+def test_sync_jev_session_run_returns_the_coroutine_value():
+    judge = ScriptedJudge([])
+
+    async def _coro():
+        return 42
+
+    with SyncJevSession(judge) as session:
+        assert session.run(_coro()) == 42
+        assert session.judge is judge
+
+
+def test_sync_jev_session_ask_batch_reuses_the_loop_across_calls():
+    judge = ScriptedJudge([
+        {"q": Answer.from_noul("q", 0.1)},
+        {"q": Answer.from_noul("q", 0.2)},
+    ])
+    questions = {"q": Noul(instructions="?")}
+    facts = Facts(state={})
+
+    with SyncJevSession(judge) as session:
+        _, first = session.ask_batch(questions, facts)
+        _, second = session.ask_batch(questions, facts)
+
+    assert first.answers["q"].noul == 0.1
+    assert second.answers["q"].noul == 0.2

@@ -1,14 +1,7 @@
 """DomainAdapter protocol: what a domain plugin supplies to drive the ODAV
-loop. No device- or report-shaped nouns here on purpose — `observe`/
-`propose`/`act`/`verify` cover both a real-world mutation (run a command,
-check its exit code) and a claim published into a report (render a finding,
-check it against already-known facts) as the same four-step shape.
-
-`act()` only ever runs on a candidate the gate has approved — a denied or
-withheld pick never reaches it. `verify()` checks the outcome against
-`facts_before` synchronously, using facts already in hand — a delayed,
-cross-run comparison (e.g. against historical journal data) is a separate,
-calibration-time operation, not this call.
+loop. `act()` only runs on a gate-approved candidate. `verify()` may check
+synchronously, or return `status="unconfirmed"` and let a real `Verdict`
+follow later via `journal.Journal.record_verdict()`.
 """
 
 from __future__ import annotations
@@ -20,57 +13,71 @@ from pydantic import BaseModel, Field
 
 
 class Facts(BaseModel):
-    """One observation, computed once per `resolve_one()` call. `state` is
-    exactly what a judge sees — a `question.py` Question is asked against it
-    verbatim. `evidence` is domain-computed ground truth available to the
-    gate's own checks (e.g. a groundedness or bounds check) without a second
-    ask; it is not sent to the judge unless a caller folds it into `state`
-    too."""
+    """One observation. `state` is exactly what a judge sees. `evidence` is
+    domain-computed ground truth for the gate's own checks, not sent to
+    the judge unless folded into `state`."""
 
     state: dict[str, Any]
     evidence: dict[str, Any] = Field(default_factory=dict)
     observed_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
+class ActStep(BaseModel):
+    """One step of a multi-step act (a planner tier, a repo-activity
+    publish/drop/rank). `detail` is domain-blind, same as `ActOutcome`."""
+
+    name: str
+    succeeded: bool | None = None
+    detail: dict[str, Any] = Field(default_factory=dict)
+
+
 class ActOutcome(BaseModel):
-    """What happened when `act()` ran — a command's exit code, a published
-    claim's text, whatever shape the domain plugin needs. `detail` is
-    domain-blind on purpose: opaque to engine.py/gate.py/journal.py, read
-    only by the domain plugin's own reporting or by a human debugging a
-    journal row."""
+    """What `act()` did. `detail` is domain-blind: opaque to engine/gate/
+    journal, read only by the domain plugin itself. `key` names which
+    journaled answer key this outcome acted on; `steps` breaks a
+    multi-step act into its parts."""
 
     succeeded: bool
     detail: dict[str, Any] = Field(default_factory=dict)
     reasons: tuple[str, ...] = ()
+    key: str | None = None
+    steps: tuple[ActStep, ...] = ()
 
 
 class Verdict(BaseModel):
-    """`verify()`'s result: whether the outcome held up against the facts
-    checked, or why not."""
+    """`verify()`'s result. Only `verified`/`failed` label anything.
+
+    `tests` names which journaled answer keys this verdict speaks to;
+    `None` lets the caller default it. `dedupe_key` makes re-recording the
+    same observation a no-op. `observed_at` decides which of two verdicts
+    for the same `(call_id, key)` supersedes the other.
+    """
 
     status: Literal["verified", "failed", "escalated", "unconfirmed"]
     reasons: tuple[str, ...] = ()
+    tests: tuple[str, ...] | None = None
+    dedupe_key: str | None = None
+    observed_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    calibrate: bool = True  # False: recorded but excluded from threshold fitting (e.g. a contradiction)
 
 
 class DomainAdapter(Protocol):
-    """Everything engine.py needs from a domain plugin, and nothing more."""
+    """Everything engine.py needs from a domain plugin."""
 
     async def observe(self) -> Facts:
-        """One observation. Called once per `resolve_one()`."""
+        """One observation per `resolve_one()` call."""
         ...
 
     def propose(self, facts: Facts) -> dict[str, str]:
-        """Real, live-enumerated candidates: id -> label. Becomes a Choice
-        question's `criteria` — never invented by the judge or the caller."""
+        """Live-enumerated candidates: id -> label. Never invented by the
+        judge or caller."""
         ...
 
     async def act(self, chosen_id: str, facts: Facts) -> ActOutcome:
-        """Run the gate-approved pick. Only called once the gate has
-        approved `chosen_id`; a denied/withheld pick never reaches this."""
+        """Runs only on a gate-approved `chosen_id`."""
         ...
 
     async def verify(self, outcome: ActOutcome, facts_before: Facts) -> Verdict:
-        """Check `outcome` against `facts_before`, using facts already in
-        hand — no new observation. A delayed, cross-run backtest is a
-        separate, calibration-time operation, not this call."""
+        """Checks `outcome` against facts already in hand -- no new
+        observation. A deferred check is a separate `Verdict`, not this call."""
         ...

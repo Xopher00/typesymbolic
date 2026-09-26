@@ -1,7 +1,7 @@
 """End to end: resolve_one() acts on a naively-confident pick, recalibrate()
 tightens the threshold from what got journaled, and the next resolve_one()
-call — reading the same store — escalates a pick it would previously have
-acted on. No model calls."""
+call — reading the same store — escalates a pick that no longer clears the
+tightened threshold. No model calls."""
 
 from typesymbolic.calibrate import recalibrate
 from typesymbolic.calibration_store import CalibrationStore
@@ -61,7 +61,7 @@ async def test_self_calibration_tightens_and_the_next_resolve_one_uses_it(tmp_pa
         await _resolve_scripted(confidence=0.6, threshold=0.5, journal=journal, store=store)
 
     result = recalibrate(
-        journal=journal, store=store, qid="kind.pick", engine="scripted", model_revision="scripted",
+        journal=journal, store=store, group="kind.pick", scale="confidence", engine="scripted", model_revision="scripted",
         default_threshold=0.5, min_precision=0.9, min_labels=15,
     )
     assert result.applied is True
@@ -90,5 +90,4 @@ async def test_resolve_one_recalibrates_inline_with_no_explicit_recalibrate_call
     ]
     assert "failed" in statuses  # some early ones still acted, on the stale threshold
     assert statuses[-1] == "needs_approval"  # by the last one, it has learned
-    assert store.get("kind.pick", engine="scripted", model_revision="scripted", default=0.5) > 0.6
-    assert store.get("kind.pick", engine="scripted", model_revision="scripted", default=0.5) > 0.6
+    assert store.get("kind.pick|confidence", engine="scripted", model_revision="scripted", default=0.5) > 0.6

@@ -3,7 +3,7 @@ act()/verify() need to support: a real-world mutation (run a command, check
 its exit code) and a claim published into a report (render a finding, check
 it against already-known facts)."""
 
-from typesymbolic.domain import ActOutcome, Facts, Verdict
+from typesymbolic.domain import ActOutcome, ActStep, Facts, Verdict
 
 
 class FakeDeviceAdapter:
@@ -102,3 +102,19 @@ async def test_claim_adapter_verify_catches_ungrounded_high_risk_claim():
 
     assert verdict.status == "failed"
     assert verdict.reasons
+
+
+def test_act_outcome_carries_key_and_steps():
+    outcome = ActOutcome(
+        succeeded=True, key="pick",
+        steps=(ActStep(name="drop", succeeded=True), ActStep(name="rank", succeeded=None, detail={"n": 3})),
+    )
+    assert outcome.key == "pick"
+    assert [s.name for s in outcome.steps] == ["drop", "rank"]
+    assert outcome.steps[1].succeeded is None
+    assert outcome.steps[1].detail == {"n": 3}
+
+
+def test_verdict_calibrate_defaults_true_and_can_be_disabled():
+    assert Verdict(status="verified").calibrate is True
+    assert Verdict(status="failed", calibrate=False).calibrate is False

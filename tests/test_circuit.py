@@ -206,12 +206,12 @@ def test_gate_spec_rejects_combine_on_a_non_boolean_op():
         GateSpec(op="threshold", input="a", combine="weak")
 
 
-def test_confidence_passes_a_noul_above_min_confidence():
-    answers = {"safe": Answer.from_noul("safe", 0.05)}  # confidence = abs(0.05-0.5)*2 = 0.9
+def test_confidence_abstains_on_a_noul_with_no_native_confidence():
+    answers = {"safe": Answer.from_noul("safe", 0.05)}
     gates = {"g": GateSpec(op="confidence", input="safe", min_confidence=0.5, band=0.0)}
     results = evaluate_gates(gates, answers)
-    assert results["g"].value == 0.05
-    assert results["g"].outcome == "decided"
+    assert results["g"].uncertain is True
+    assert results["g"].outcome == "abstain"
 
 
 def test_confidence_abstains_below_min_confidence():

@@ -9,11 +9,12 @@ owns the engine loop, the gate, the journal, and calibration outright, so
 that discipline is not re-derived per application.
 """
 
+from .blobstore import BlobStore
 from .calibrate import (
     PromotionError,
     RecalibrationResult,
     ThresholdProposal,
-    grid_search_weights,
+    current_threshold,
     recalibrate,
     tighten_only_threshold,
 )
@@ -21,6 +22,7 @@ from .calibration_store import CalibrationStore
 from .circuit import CircuitError, CircuitResult, GateSpec, evaluate_gates, result_key
 from .domain import ActOutcome, DomainAdapter, Facts, Verdict
 from .engine import ResolveResult, ask_batch, circuit_gate_extra, resolve_one
+from .errors import TypesymbolicError
 from .gate import GateResult, GateVerdict, claim_gate, mutation_gate
 from .journal import Journal
 from .judge import (
@@ -32,13 +34,31 @@ from .judge import (
     SyncJevSession,
     ask_all_sync,
 )
-from .question import Answer, Choice, Noul, Question, Score
-from .vocab import FrozenVocabulary, Vocabulary, VocabularyError
+from .labels import LabelIndex
+from .question import (
+    Answer,
+    Choice,
+    Noul,
+    NoulCriteria,
+    Question,
+    QuestionRef,
+    Scale,
+    Score,
+)
+from .vocab import (
+    FrozenVocabulary,
+    Vocabulary,
+    VocabularyError,
+    calibration_unit,
+    unit_name,
+)
+from .weights import grid_search_weights
 
 __all__ = [
     "ActOutcome",
     "Answer",
     "AskResult",
+    "BlobStore",
     "CalibrationStore",
     "Choice",
     "CircuitError",
@@ -53,22 +73,29 @@ __all__ = [
     "Journal",
     "JudgeEngine",
     "JudgeError",
+    "LabelIndex",
     "Noul",
+    "NoulCriteria",
     "PromotionError",
     "Question",
+    "QuestionRef",
     "RecalibrationResult",
     "ResolveResult",
+    "Scale",
     "Score",
     "ScriptedJudge",
     "SyncJevSession",
     "ThresholdProposal",
+    "TypesymbolicError",
     "Verdict",
     "Vocabulary",
     "VocabularyError",
     "ask_all_sync",
     "ask_batch",
+    "calibration_unit",
     "circuit_gate_extra",
     "claim_gate",
+    "current_threshold",
     "evaluate_gates",
     "grid_search_weights",
     "mutation_gate",
@@ -76,4 +103,5 @@ __all__ = [
     "resolve_one",
     "result_key",
     "tighten_only_threshold",
+    "unit_name",
 ]

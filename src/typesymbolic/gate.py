@@ -22,6 +22,20 @@ class GateVerdict:
     WITHHOLD = "withhold"
 
 
+_KNOWN_VERDICTS = frozenset((
+    GateVerdict.ACT, GateVerdict.NEEDS_APPROVAL, GateVerdict.DENY,
+    GateVerdict.PUBLISH, GateVerdict.HEDGE, GateVerdict.WITHHOLD,
+))
+
+
+def _check_on_uncertain(on_uncertain: str | None) -> None:
+    """`on_uncertain` overrides which verdict an uncertain result settles
+    to; a value `blocks_act()` doesn't recognize would silently let a
+    low-confidence pick through to `act()`."""
+    if on_uncertain is not None and on_uncertain not in _KNOWN_VERDICTS:
+        raise ValueError(f"on_uncertain must be one of {sorted(_KNOWN_VERDICTS)}, got {on_uncertain!r}")
+
+
 def blocks_act(verdict: str) -> bool:
     """HEDGE still reaches act() (published, just caveated); NEEDS_APPROVAL
     blocks — a single-shot resolve() has no human-in-the-loop step."""
@@ -43,7 +57,7 @@ def _confidence_verdict(
     passes, uncertain = threshold_decision(confidence, threshold, band=band)
     settled_uncertain = on_uncertain or uncertain_verdict
     if passes is None:
-        return GateResult(ok_verdict, "no confidence to gate", confidence, call_id)
+        return GateResult(settled_uncertain, "no confidence to gate", confidence, call_id)
     if uncertain:
         return GateResult(settled_uncertain, f"confidence {confidence:.2f} within {band} of threshold {threshold:.2f}", confidence, call_id)
     if passes:
@@ -57,6 +71,7 @@ def mutation_gate(
 ) -> GateResult:
     """`denied` is the domain plugin's own deny-list verdict — a denied
     action never runs even at confidence 1.0."""
+    _check_on_uncertain(on_uncertain)
     if denied:
         return GateResult(GateVerdict.DENY, "deny_listed", confidence, call_id)
     return _confidence_verdict(
@@ -71,6 +86,7 @@ def claim_gate(
 ) -> GateResult:
     """`grounded` is the domain plugin's own groundedness check — an
     ungrounded claim is withheld even at confidence 1.0."""
+    _check_on_uncertain(on_uncertain)
     if not grounded:
         return GateResult(GateVerdict.WITHHOLD, "ungrounded", confidence, call_id)
     return _confidence_verdict(

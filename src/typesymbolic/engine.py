@@ -1,54 +1,27 @@
-"""The ODAV loop: observe -> propose -> ask the judge -> gate -> act ->
-verify -> journal. Single-shot `resolve_one()` only — a multi-step loop
-needs a second real domain plugin to validate it against.
+"""The ODAV loop: observe -> decide -> gate -> act -> verify -> journal.
 
-`gate_extra`, given the pick, the facts, and the `verify_qid` answer (if
-any), supplies whatever extra kwarg the chosen `gate` needs (`denied=...`
-for `mutation_gate`, `grounded=...` for `claim_gate`) — `resolve_one()`
-itself stays gate-shape-blind. `circuit_gate_extra()` builds a `gate_extra`
-from a `circuit.py` circuit.
-
-`store`, given, makes `threshold` the fallback and reads the live value
-keyed on `(qid, judge.name, result.model_revision)`. With `journal` also
-given, `resolve_one()` recalibrates that key inline before reading it,
-whenever `journal`'s live index has grown past what `store` was last
-calibrated against — so the threshold this qid gates on always reflects
-everything verified about it before now, not just whatever a caller
-remembered to recalibrate on a separate schedule. The freshness check costs
-a `flush()` (bounded by however far behind the write queue currently is,
-not by journal size) only on the call where it's actually needed.
-
-`resolve_one()` isn't the only shape a decision takes: it's "one Choice
-question, one gate, one act/verify" -- a joint decision over many
-heterogeneous questions judged together (a Noul, a Choice, several Scores,
-gated independently, with ordinary code then routing on the combination)
-has no single candidate to pick and no single act()/verify() step, so it
-doesn't fit `DomainAdapter` at all. `ask_batch()` is the piece of
-`resolve_one()` that *does* generalize to that case -- ask a named batch in
-one request, journal it under one `call_id` -- factored out so both
-callers share it rather than a batch caller reimplementing it inline. What
-doesn't generalize is left alone: gating a batch is `circuit.evaluate_gates()`,
-already built for exactly this; acting on the gated combination is
-domain-specific routing code with no shape in common across domains, so
-nothing here tries to generalize it.
+`ask_batch()` journals one batch per call_id, an error row on failure.
+`decide()` wraps it for a `vocab`-driven `specs` map, keyed for per-key
+gate/act/verify on the returned `BatchDecision`. `Episode` threads one
+`episode_id` through several acts; `resolve_one()` composes these for a
+single-shot Choice, its `gate_extra` optionally from `circuit_gate_extra()`.
 """
 
 from __future__ import annotations
 
-import asyncio
 import uuid
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 
-from .calibrate import recalibrate as _recalibrate
-from .circuit import GateSpec, evaluate_gates, result_key
+from . import calibrate
+from .circuit import CircuitResult, GateSpec, evaluate_gates, result_key
 from .domain import ActOutcome, DomainAdapter, Facts, Verdict
 from .gate import GateResult, blocks_act, mutation_gate
 from .journal import Journal
 from .judge import AskResult, JudgeEngine
-from .question import Answer, Choice, Noul, Question
-from .vocab import Vocabulary
+from .question import Answer, Choice, Noul, Question, QuestionRef
+from .vocab import Vocabulary, calibration_unit
 
 if TYPE_CHECKING:
     from .calibration_store import CalibrationStore
@@ -66,23 +39,152 @@ class ResolveResult:
 
 
 async def ask_batch(
-    *, judge: JudgeEngine, questions: dict[str, Question], facts: Facts,
-    journal: Journal | None = None, phase: str | None = None,
+    *, judge: JudgeEngine, questions: dict[str, Question], facts: Facts, journal: Journal | None = None,
+    phase: str | None = None, refs: dict[str, QuestionRef] | None = None, scope: dict | None = None,
+    capture: bool = False, extra: dict | None = None, call_id: str | None = None,
 ) -> tuple[str, AskResult]:
-    """Ask a named batch of questions in one request and journal them
-    together under one fresh `call_id` -- the ask+journal step `resolve_one()`
-    does inline for its one-Choice case, shared here for a caller judging
-    many heterogeneous questions about the same `facts` together. Gating the
-    batch is `circuit.evaluate_gates(gates, result.answers)`; what happens
-    with the gated result is the caller's own domain logic."""
-    call_id = str(uuid.uuid4())
-    result = await judge.ask_all(facts.state, questions)
+    """Ask a batch in one request, journaled under one `call_id`. On failure,
+    journals an error row with empty answers, then re-raises."""
+    if call_id is None:
+        call_id = str(uuid.uuid4())
+    state_cap = facts.state if capture else None
+    asked_cap = ({k: q.model_dump(mode="json", exclude_none=True)
+                  for k, q in questions.items()} if capture else None)
+    try:
+        result = await judge.ask_all(facts.state, questions)
+    except Exception as error:
+        if journal is not None:
+            err_extra = dict(extra) if extra else {}
+            journal.record_decision(
+                call_id=call_id, engine=judge.name, phase=phase, answers={},
+                questions=refs, scope=scope, state=state_cap, asked=asked_cap,
+                error=str(error), extra=err_extra if err_extra else None,
+            )
+        raise
     if journal is not None:
+        dec_extra = {"usage": result.usage} if result.usage else {}
+        if extra:
+            dec_extra.update(extra)
         journal.record_decision(
             call_id=call_id, engine=judge.name, phase=phase, answers=result.answers,
-            model_revision=result.model_revision,
+            model_revision=result.model_revision, questions=refs, scope=scope,
+            state=state_cap, asked=asked_cap, elapsed_ms=result.elapsed_ms,
+            extra=dec_extra if dec_extra else None,
         )
     return call_id, result
+
+
+async def decide(
+    *, judge: JudgeEngine, vocab: Vocabulary, specs: dict[str, tuple[str, dict | None, str | None, Any]],
+    facts: Facts, journal: Journal | None = None, phase: str | None = None,
+    scope: dict | None = None, store: CalibrationStore | None = None,
+    capture: bool = False, extra: dict | None = None, call_id: str | None = None,
+) -> BatchDecision:
+    """One batched ask over `specs` = `{key: (qid, slots, subject, criteria)}`,
+    each key independently gate/act/verify-able off the returned `BatchDecision`."""
+    questions: dict[str, Question] = {}
+    refs: dict[str, QuestionRef] = {}
+    for key, (qid, slots, subject, criteria) in specs.items():
+        question = vocab.ask(qid, criteria=criteria, **(slots or {}))
+        questions[key] = question
+        group, scale = calibration_unit(vocab, qid, question)
+        refs[key] = QuestionRef(
+            qid=qid, vocab_version=vocab.version, subject=subject, group=group, scale=scale,
+        )
+    call_id, result = await ask_batch(
+        judge=judge, questions=questions, facts=facts, journal=journal, phase=phase, refs=refs, scope=scope,
+        capture=capture, extra=extra, call_id=call_id,
+    )
+    return BatchDecision(
+        call_id, result.answers, refs, result.model_revision, facts, judge.name, journal, store, scope,
+    )
+
+
+@dataclass
+class BatchDecision:
+    """One `decide()` result: several answer keys sharing one call_id."""
+
+    call_id: str
+    answers: dict[str, Answer]
+    refs: dict[str, QuestionRef]
+    model_revision: str | None
+    facts: Facts
+    engine: str
+    journal: Journal | None = None
+    store: CalibrationStore | None = None
+    scope: dict | None = None
+    _acted: list[str] = field(default_factory=list, init=False, repr=False)
+
+    async def threshold(self, key: str, default: float) -> float:
+        """The calibrated threshold for `key`'s unit, or `default` with no store."""
+        if self.store is None:
+            return default
+        ref = self.refs[key]
+        return await calibrate.current_threshold(
+            journal=self.journal, store=self.store, group=ref.group, scale=ref.scale,
+            engine=self.engine, model_revision=self.model_revision, default_threshold=default,
+        )
+
+    async def gate(
+        self, key: str, gate_fn: Callable[..., GateResult], *, default: float, **kw: Any,
+    ) -> GateResult:
+        """Runs `gate_fn` on `key`'s answer at its calibrated threshold."""
+        tau = await self.threshold(key, default)
+        return gate_fn(self.answers[key].value(self.refs[key].scale), tau, call_id=self.call_id, **kw)
+
+    async def circuit(self, gate_specs: dict[str, GateSpec]) -> dict[str, CircuitResult]:
+        """`evaluate_gates`, with each gate id naming a key getting its `tau`
+        resolved via `threshold()` first."""
+        resolved: dict[str, GateSpec] = {}
+        for gid, spec in gate_specs.items():
+            if gid in self.refs:
+                resolved[gid] = replace(spec, tau=await self.threshold(gid, spec.tau))
+            else:
+                resolved[gid] = spec
+        return evaluate_gates(resolved, self.answers)
+
+    def act(self, key: str, outcome: ActOutcome | None, gate: GateResult | None) -> None:
+        """Journals Gate+Act for `key`; `outcome=None` records a blocked gate."""
+        self._acted.append(key)
+        if self.journal is not None:
+            episode_id = (self.scope or {}).get("episode_id")
+            self.journal.record_outcome(
+                call_id=self.call_id, gate=gate, outcome=outcome, key=key, episode_id=episode_id,
+            )
+
+    def verify(self, verdict: Verdict) -> None:
+        """Journals Verify; `verdict.tests` defaults to every acted key."""
+        if self.journal is not None:
+            tests = verdict.tests if verdict.tests is not None else tuple(self._acted)
+            self.journal.record_verdict(call_id=self.call_id, verdict=verdict, tests=tests)
+
+
+class Episode:
+    """One `episode_id` threaded through several acts, e.g. a planner's tiers."""
+
+    def __init__(self, journal: Journal | None, scope: dict | None = None) -> None:
+        self.journal = journal
+        self.episode_id = str(uuid.uuid4())
+        self.scope = {**(scope or {}), "episode_id": self.episode_id}
+
+    def outcome(
+        self, outcome: ActOutcome, *, gate: GateResult | None = None,
+        call_id: str | None = None, key: str | None = None,
+    ) -> None:
+        """Journals one Act step of this episode; `gate=None` is a code-policy act."""
+        if self.journal is not None:
+            self.journal.record_outcome(
+                call_id=call_id or str(uuid.uuid4()), gate=gate, outcome=outcome,
+                key=key, episode_id=self.episode_id,
+            )
+
+
+def _expect(vocab: Vocabulary, qid: str, slots: dict, kind: type, noun: str) -> Question:
+    """`vocab.ask(qid)`, raising if it isn't a `kind` question."""
+    question = vocab.ask(qid, **slots)
+    if not isinstance(question, kind):
+        raise TypeError(f"{qid}: {noun} vocab returned {type(question).__name__}")
+    return question
 
 
 async def resolve_one(
@@ -92,70 +194,53 @@ async def resolve_one(
     verify_qid: str | None = None, store: CalibrationStore | None = None,
     journal: Journal | None = None, slots: dict[str, str] | None = None,
 ) -> ResolveResult:
-    """One goal -> one gated action, end to end."""
+    """One goal -> one gated action, end to end, built on `decide`/`gate`/`act`/`verify`."""
     facts = await domain.observe()
     candidates = domain.propose(facts)
-    call_id = str(uuid.uuid4())
-
     if not candidates:
-        return ResolveResult("escalated", ("no candidates fit",), call_id, facts, None, None, None)
+        return ResolveResult("escalated", ("no candidates fit",), str(uuid.uuid4()), facts, None, None, None)
 
-    template = vocab.ask(qid, **(slots or {}))
-    if not isinstance(template, Choice):
-        raise TypeError(f"{qid}: resolve_one() drives a Choice question; vocab returned {type(template).__name__}")
-    questions: dict[str, Question] = {qid: Choice(instructions=template.instructions, criteria=candidates)}
-
+    resolved_slots = slots or {}
+    _expect(vocab, qid, resolved_slots, Choice, "resolve_one() drives a Choice question;")
+    specs = {qid: (qid, resolved_slots, None, candidates)}
     if verify_qid is not None:
-        verify_template = vocab.ask(verify_qid, **(slots or {}))
-        if not isinstance(verify_template, Noul):
-            raise TypeError(f"{verify_qid}: verify_qid must be a Noul question; vocab returned {type(verify_template).__name__}")
-        questions[verify_qid] = verify_template
+        _expect(vocab, verify_qid, resolved_slots, Noul, "verify_qid must be a Noul question;")
+        specs[verify_qid] = (verify_qid, resolved_slots, None, None)
 
-    call_id, result = await ask_batch(judge=judge, questions=questions, facts=facts, journal=journal, phase="decide")
-    answer = result.answers[qid]
-    verify_answer = result.answers.get(verify_qid) if verify_qid is not None else None
-
+    decision = await decide(
+        judge=judge, vocab=vocab, specs=specs, facts=facts, journal=journal, phase="decide", store=store,
+    )
+    answer = decision.answers[qid]
+    verify_answer = decision.answers.get(verify_qid) if verify_qid is not None else None
     chosen_id = answer.choice
     if chosen_id not in candidates:
-        return ResolveResult(
-            "escalated", (f"judge picked {chosen_id!r}, outside the live-enumerated candidates",),
-            call_id, facts, None, None, None,
-        )
+        reason = f"judge picked {chosen_id!r}, outside the live-enumerated candidates"
+        return ResolveResult("escalated", (reason,), decision.call_id, facts, None, None, None)
 
     extra = gate_extra(chosen_id, facts, verify_answer) if gate_extra is not None else {}
-    if store is not None and journal is not None:
-        await asyncio.to_thread(journal.flush)
-        fresh_n = len(journal.labeled_pairs(qid, engine=judge.name, model_revision=result.model_revision))
-        if fresh_n > store.get_n(qid, engine=judge.name, model_revision=result.model_revision):
-            _recalibrate(journal=journal, store=store, qid=qid, engine=judge.name, model_revision=result.model_revision, default_threshold=threshold)
-    gate_threshold = (
-        store.get(qid, engine=judge.name, model_revision=result.model_revision, default=threshold)
-        if store is not None else threshold
-    )
-    gate_result = gate(answer.confidence, gate_threshold, call_id=call_id, **extra)
-
+    gate_result = await decision.gate(qid, gate, default=threshold, **extra)
     if blocks_act(gate_result.verdict):
-        if journal is not None:
-            journal.record_outcome(call_id=call_id, gate=gate_result)
-        return ResolveResult(gate_result.verdict, (gate_result.reason,), call_id, facts, gate_result, None, None)
+        decision.act(qid, None, gate_result)
+        return ResolveResult(
+            gate_result.verdict, (gate_result.reason,), decision.call_id, facts, gate_result, None, None,
+        )
 
     outcome = await domain.act(chosen_id, facts)
     verdict = await domain.verify(outcome, facts)
-    if journal is not None:
-        journal.record_outcome(call_id=call_id, gate=gate_result, outcome=outcome, verdict=verdict)
-
-    return ResolveResult(verdict.status, verdict.reasons, call_id, facts, gate_result, outcome, verdict)
+    decision.act(qid, outcome, gate_result)
+    decision.verify(verdict)
+    return ResolveResult(
+        verdict.status, verdict.reasons, decision.call_id, facts, gate_result, outcome, verdict,
+    )
 
 
 def circuit_gate_extra(
     gates: dict[str, GateSpec], *, key: str, kwarg: str,
     verify_key: str = "verify", extra: Callable[[Facts], dict[str, Answer]] | None = None,
 ) -> Callable[[str, Facts, Answer | None], dict[str, Any]]:
-    """Build a `gate_extra` from a circuit: evaluates `gates` over the
-    `verify_qid` answer (keyed as `verify_key`) plus `extra(facts)`, and
-    returns `{kwarg: result_key(gates[key]) is True}` — an abstain/escalate
-    outcome makes `result_key` return its outcome string, not `True`, so an
-    uncertain circuit fails closed the same as an explicit `False`."""
+    """Build a `gate_extra` from a circuit over the `verify_qid` answer
+    (keyed as `verify_key`) plus `extra(facts)`. An abstain/escalate
+    outcome fails closed, same as an explicit `False`."""
     def _gate_extra(chosen_id: str, facts: Facts, verify_answer: Answer | None) -> dict[str, Any]:
         answers = dict(extra(facts)) if extra is not None else {}
         if verify_answer is not None:

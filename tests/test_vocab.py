@@ -4,7 +4,12 @@ from typesymbolic.domain import ActOutcome, Facts, Verdict
 from typesymbolic.engine import resolve_one
 from typesymbolic.judge import ScriptedJudge
 from typesymbolic.question import Answer, Choice, Noul, Score
-from typesymbolic.vocab import FrozenVocabulary, VocabularyError
+from typesymbolic.vocab import (
+    FrozenVocabulary,
+    VocabularyError,
+    calibration_unit,
+    unit_name,
+)
 
 
 def test_noul_entry_builds_a_noul():
@@ -12,6 +17,48 @@ def test_noul_entry_builds_a_noul():
     question = vocab.ask("safe", thing="this command")
     assert isinstance(question, Noul)
     assert question.instructions == "is this command safe?"
+
+
+def test_noul_entry_with_criteria_builds_noul_criteria():
+    vocab = FrozenVocabulary("v1", {
+        "safe": {"type": "noul", "instructions": "is this safe?", "criteria": {"true": "yes", "false": None}},
+    })
+    question = vocab.ask("safe")
+    assert question.criteria.true == "yes"
+    assert question.criteria.false is None
+
+
+def test_choice_entry_tolerates_a_none_label():
+    vocab = FrozenVocabulary("v1", {
+        "kind": {"type": "choice", "instructions": "pick a kind", "criteria": {"a": None, "b": "option b"}},
+    })
+    question = vocab.ask("kind")
+    assert question.criteria == {"a": None, "b": "option b"}
+
+
+def test_calibration_unit_defaults_to_qid_and_a_type_appropriate_scale():
+    vocab = FrozenVocabulary("v1", {"safe": {"type": "noul", "instructions": "is this safe?"}})
+    question = vocab.ask("safe")
+    assert calibration_unit(vocab, "safe", question) == ("safe", "noul_p")
+
+
+def test_calibration_unit_uses_a_declared_group_and_scale():
+    vocab = FrozenVocabulary("v1", {
+        "fit_1": {"type": "noul", "instructions": "does 1 fit?", "calib_group": "fit", "scale": "noul_p"},
+        "fit_2": {"type": "noul", "instructions": "does 2 fit?", "calib_group": "fit", "scale": "noul_p"},
+    })
+    q1, q2 = vocab.ask("fit_1"), vocab.ask("fit_2")
+    assert calibration_unit(vocab, "fit_1", q1) == ("fit", "noul_p")
+    assert calibration_unit(vocab, "fit_2", q2) == ("fit", "noul_p")
+
+
+def test_vocabulary_rejects_an_unknown_scale():
+    with pytest.raises(VocabularyError):
+        FrozenVocabulary("v1", {"q": {"type": "noul", "instructions": "?", "scale": "not_a_scale"}})
+
+
+def test_unit_name_joins_group_and_scale():
+    assert unit_name("safe", "noul_p") == "safe|noul_p"
 
 
 def test_choice_entry_builds_a_choice_with_criteria():
@@ -62,7 +109,7 @@ def test_missing_slot_raises_vocabulary_error_naming_it():
     {"q": {"type": "xor", "instructions": "?"}},
     {"q": {"type": "noul", "instructions": ""}},
     {"q": {"type": "noul"}},
-    {"q": {"type": "noul", "instructions": "?", "criteria": {"true": "y"}}},
+    {"q": {"type": "noul", "instructions": "?", "criteria": {"maybe": "y"}}},
     {"q": {"type": "choice", "instructions": "?", "criteria": {"a": 1}}},
     {"q": {"type": "score", "instructions": "?", "criteria": []}},
     {"q": {"type": "score", "instructions": "?", "criteria": [1, 2]}},
@@ -91,6 +138,39 @@ def test_mutating_a_returned_choice_criteria_does_not_affect_later_asks():
     question.criteria["a"] = "tampered"
     again = vocab.ask("kind")
     assert again.criteria == {"a": "A"}
+
+
+def test_ask_criteria_overrides_a_choice_entrys_own_criteria():
+    vocab = FrozenVocabulary("v1", {
+        "kind": {"type": "choice", "instructions": "pick a kind", "criteria": {"placeholder": "unused"}},
+    })
+    question = vocab.ask("kind", criteria={"a": "option a", "b": None})
+    assert question.criteria == {"a": "option a", "b": None}
+
+
+def test_ask_with_no_criteria_falls_back_to_the_choice_entrys_own():
+    vocab = FrozenVocabulary("v1", {
+        "kind": {"type": "choice", "instructions": "pick a kind", "criteria": {"a": "option a"}},
+    })
+    question = vocab.ask("kind")
+    assert question.criteria == {"a": "option a"}
+
+
+def test_ask_criteria_overrides_a_noul_entrys_own_criteria():
+    vocab = FrozenVocabulary("v1", {
+        "safe": {"type": "noul", "instructions": "is this safe?", "criteria": {"true": "placeholder"}},
+    })
+    question = vocab.ask("safe", criteria={"true": "live true wording", "false": "live false wording"})
+    assert question.criteria.true == "live true wording"
+    assert question.criteria.false == "live false wording"
+
+
+def test_ask_with_no_criteria_falls_back_to_the_noul_entrys_own():
+    vocab = FrozenVocabulary("v1", {
+        "safe": {"type": "noul", "instructions": "is this safe?", "criteria": {"true": "yes"}},
+    })
+    question = vocab.ask("safe")
+    assert question.criteria.true == "yes"
 
 
 class DeviceAdapter:
